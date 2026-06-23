@@ -34,8 +34,8 @@ http://localhost:18305/
 
 ```bash
 KURAGE_API=http://127.0.0.1:18303
-OLLAMA_URL=http://192.168.0.14:11434
-OLLAMA_MODEL=gemma4:e4b
+OLLAMA_URL=http://192.168.0.3:11434
+OLLAMA_MODEL=gemma4:12b-it-qat
 KMONTAGE_TRANSCRIBE_PYTHON=/home/kojima/work/kuragevp/.venv/bin/python
 KMONTAGE_TRANSCRIBE_MODEL=small
 KMONTAGE_YTDLP_COOKIES_BROWSER=chrome

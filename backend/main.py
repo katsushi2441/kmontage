@@ -24,8 +24,8 @@ STATIC_DIR = ROOT / "static"
 STORAGE_DIR = ROOT / "storage"
 JOBS_DIR = STORAGE_DIR / "jobs"
 KURAGE_API = os.environ.get("KURAGE_API", "http://127.0.0.1:18303").rstrip("/")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.3:11434").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "yt-dlp")
 YTDLP_COOKIES_FILE = os.environ.get("KMONTAGE_YTDLP_COOKIES_FILE", "")
 YTDLP_COOKIES_BROWSER = os.environ.get("KMONTAGE_YTDLP_COOKIES_BROWSER", "")
@@ -411,7 +411,7 @@ def index() -> str:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "service": "kmontage", "time": now(), "kurage_api": KURAGE_API, "ollama_url": OLLAMA_URL}
+    return {"ok": True, "service": "kmontage", "time": now(), "kurage_api": KURAGE_API, "ollama_url": OLLAMA_URL, "ollama_model": OLLAMA_MODEL}
 
 
 @app.post("/api/jobs")
