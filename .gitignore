@@ -1,0 +1,10 @@
+OpenMontage/
+.venv/
+__pycache__/
+*.pyc
+storage/tmp/
+storage/jobs/*/media/
+storage/jobs/*/*.mp4
+storage/jobs/*/*.mp3
+storage/jobs/*/*.wav
+.env
