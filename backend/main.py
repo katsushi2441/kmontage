@@ -252,7 +252,13 @@ def build_analysis_prompt(url: str, kind: str, meta: dict[str, Any], transcript:
     description = meta.get("description") or ""
     uploader = meta.get("uploader") or meta.get("channel") or ""
     duration = meta.get("duration") or ""
-    return f"""次の参照動画を理解し、日本語ショート動画に再構成するための制作プランを作ってください。
+    transcript_excerpt = transcript[:14000]
+    if len(transcript) > 18000:
+        transcript_excerpt += "\n\n--- transcript tail ---\n" + transcript[-4000:]
+    return f"""次の参照動画を分析し、日本語ショート動画に再構成してください。
+
+これは「一般論の解説」ではありません。元動画がバズった理由、収益化ノウハウ、具体的な数字、ツール、手順、注意点を忠実に抽出してください。
+元動画にない話は入れないでください。考察を入れる場合は「考察」と明示してください。
 
 URL: {url}
 種類: {kind}
@@ -263,24 +269,56 @@ URL: {url}
 {description[:1200]}
 
 文字起こし/字幕:
-{transcript[:5000]}
+{transcript_excerpt}
 
 要件:
 - 日本語で出力
 - 元動画を丸ごと転載するのではなく、要点解説・考察にする
 - 視聴者が最初の3秒で何の話かわかるフックを作る
-- 60〜120秒の縦型ショート向け
+- 60〜120秒の縦型ショート向け、12シーン、各10秒程度
 - Kurage VTuberが話す想定
-- 誇張しすぎず、元動画で確認できる範囲と考察を分ける
+- 抽象論で終わらせない。「何を、どの順番で、なぜやるのか」を入れる
+- 金額、再生数、RPM、制作費、期間、投稿頻度などの数字を優先して残す
+- ツール名や作業工程がある場合は残す
+- 著作権、コピー、シャドウバン、低品質量産などの注意点があれば残す
+- 競合分析、台本作成、画像生成、音声生成、編集、外注化などの手順があれば残す
+- 最終台本は、元動画の要点を忠実に圧縮した内容にする
+
+OpenMontageの設計思想を参考に、次の中間成果物を明示してください。
+- reference_analysis: 元動画の事実、数字、手順、注意点、バズった構造
+- scene_plan: どの要点をどの順で見せるか
+- script: Kurageがそのまま動画化できる12シーン台本
 
 JSONのみで返してください。
 形式:
 {{
-  "title": "日本語タイトル",
-  "summary": "要点の短い要約",
-  "key_points": ["要点1", "要点2", "要点3", "要点4"],
-  "script_outline": ["導入", "要点", "背景", "考察", "まとめ"],
-  "kurage_content": "Kurageに渡す動画生成用本文。600〜1200字。"
+  "reference_analysis": {{
+    "title": "元動画の要点タイトル",
+    "core_claim": "元動画が主張している中心命題",
+    "evidence_numbers": ["30日で3300ドル", "制作費20ドル", "140K再生で700ドル売上"],
+    "workflow_steps": ["手順1", "手順2", "手順3"],
+    "tools_or_methods": ["Claude", "AI voiceover", "CapCut"],
+    "risks": ["注意点1", "注意点2"],
+    "why_it_went_viral": ["理由1", "理由2"]
+  }},
+  "scene_plan": {{
+    "title": "日本語動画タイトル",
+    "target_duration": 120,
+    "scenes": [
+      {{"index":0,"role":"hook","source_basis":"元動画の根拠","message":"このシーンで伝える要点"}}
+    ]
+  }},
+  "script": {{
+    "title": "日本語動画タイトル",
+    "scenes": [
+      {{"index":0,"narration":"日本語ナレーション。具体的な数字や手順を含める。","image_prompt":"English vertical 9:16 explainer visual under 100 chars","duration":10}}
+    ]
+  }},
+  "qa": {{
+    "concrete_facts_used": ["台本に入れた具体事実"],
+    "omitted_topics": ["短尺化のため省略した要素"],
+    "faithfulness_note": "元動画への忠実性の説明"
+  }}
 }}
 """
 
@@ -298,7 +336,7 @@ def parse_json_object(text: str) -> dict[str, Any]:
 
 def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
     prompt = build_analysis_prompt(url, kind, meta, transcript)
-    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.2, "num_predict": 4096}}
+    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.1, "num_predict": 8192}}
     res = requests.post(ollama_generate_url(), json=payload, timeout=300)
     res.raise_for_status()
     response = res.json().get("response") or ""
@@ -308,36 +346,122 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
     except Exception:
         title = meta.get("title") or "参照動画の要点解説"
         base = transcript or meta.get("description") or title
+        points = [line.strip() for line in re.split(r"[。\n]", base) if line.strip()][:8]
+        scenes = []
+        for i, point in enumerate(points[:12]):
+            scenes.append({
+                "index": i,
+                "narration": point[:90],
+                "image_prompt": "clean Japanese vertical explainer, data cards, 9:16",
+                "duration": 10,
+            })
         analysis = {
-            "title": f"{title} 要点解説",
-            "summary": base[:300],
-            "key_points": [line.strip() for line in re.split(r"[。\n]", base) if line.strip()][:4],
-            "script_outline": ["参照動画のテーマ", "重要ポイント", "背景", "Kurageの考察", "まとめ"],
-            "kurage_content": base[:1200],
+            "reference_analysis": {
+                "title": f"{title} 要点解説",
+                "core_claim": base[:200],
+                "evidence_numbers": re.findall(r"(?:\\$?\\d[\\d,.]*\\s?(?:ドル|円|views?|再生|K|万|%|RPM)?)", base)[:8],
+                "workflow_steps": points[:6],
+                "tools_or_methods": [],
+                "risks": [],
+                "why_it_went_viral": [],
+            },
+            "scene_plan": {"title": f"{title} 要点解説", "target_duration": 120, "scenes": []},
+            "script": {"title": f"{title} 要点解説", "scenes": scenes},
+            "qa": {"concrete_facts_used": points[:4], "omitted_topics": [], "faithfulness_note": "fallback from transcript"},
         }
+    analysis = normalize_reference_analysis(analysis, meta, transcript)
+    write_openmontage_artifacts(job_dir, analysis)
     return analysis
 
 
-def enqueue_kurage(job_id: str, url: str, kind: str, analysis: dict[str, Any], vtuber_mode: bool, video_style: str) -> str:
-    title = str(analysis.get("title") or "参照動画の要点解説").strip()
-    key_points = analysis.get("key_points") or []
-    outline = analysis.get("script_outline") or []
-    content = str(analysis.get("kurage_content") or analysis.get("summary") or title).strip()
-    content = (
-        f"参照動画URL: {url}\n"
-        f"入力タイプ: {kind}\n\n"
-        f"要約: {analysis.get('summary','')}\n\n"
-        f"重要ポイント:\n" + "\n".join(f"- {p}" for p in key_points) + "\n\n"
-        f"構成案:\n" + "\n".join(f"- {p}" for p in outline) + "\n\n"
-        f"本文:\n{content}"
+def normalize_reference_analysis(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> dict[str, Any]:
+    reference = analysis.get("reference_analysis")
+    if not isinstance(reference, dict):
+        reference = {}
+    script = analysis.get("script")
+    if not isinstance(script, dict):
+        script = {}
+    title = str(script.get("title") or reference.get("title") or meta.get("title") or "参照動画の要点解説").strip()
+    evidence_text = json.dumps(reference.get("evidence_numbers") or [], ensure_ascii=False)
+    # Keep the generated title aligned with extracted evidence. Local LLMs can
+    # compress "$3,300 / 約50万円" into an inaccurate "月30万円" headline.
+    if "3,300" in evidence_text and "50万円" in evidence_text and "月30万円" in title:
+        title = title.replace("月30万円", "月50万円")
+    scenes = script.get("scenes")
+    if not isinstance(scenes, list):
+        scenes = []
+    cleaned = []
+    for i, scene in enumerate(scenes[:12]):
+        if not isinstance(scene, dict):
+            continue
+        narration = str(scene.get("narration") or "").strip()
+        if not narration:
+            continue
+        cleaned.append({
+            "index": len(cleaned),
+            "narration": narration,
+            "image_prompt": str(scene.get("image_prompt") or "clean Japanese vertical explainer, data cards, 9:16").strip()[:180],
+            "duration": int(scene.get("duration") or 10),
+        })
+    if len(cleaned) < 6:
+        points = [p.strip() for p in re.split(r"(?<=[.!?。])\\s+|\\n+", transcript) if len(p.strip()) > 25][:12]
+        cleaned = [{
+            "index": i,
+            "narration": point[:95],
+            "image_prompt": "clean Japanese vertical explainer, data cards, 9:16",
+            "duration": 10,
+        } for i, point in enumerate(points)]
+    analysis["reference_analysis"] = reference
+    analysis["script"] = {"title": title[:70], "scenes": cleaned[:12]}
+    plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
+    plan["title"] = plan.get("title") or title
+    plan["target_duration"] = sum(int(s.get("duration") or 10) for s in cleaned[:12])
+    if not isinstance(plan.get("scenes"), list) or not plan.get("scenes"):
+        plan["scenes"] = [
+            {"index": s["index"], "role": "faithful_summary", "message": s["narration"], "source_basis": "transcript"}
+            for s in cleaned[:12]
+        ]
+    analysis["scene_plan"] = plan
+    analysis.setdefault("qa", {})
+    return analysis
+
+
+def write_openmontage_artifacts(job_dir: Path, analysis: dict[str, Any]) -> None:
+    """Persist OpenMontage-style intermediate artifacts for auditability."""
+    (job_dir / "reference_analysis.json").write_text(
+        json.dumps(analysis.get("reference_analysis") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
+    (job_dir / "scene_plan.json").write_text(
+        json.dumps(analysis.get("scene_plan") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (job_dir / "script.json").write_text(
+        json.dumps(analysis.get("script") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (job_dir / "qa.json").write_text(
+        json.dumps(analysis.get("qa") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def enqueue_kurage(job_id: str, url: str, kind: str, analysis: dict[str, Any], vtuber_mode: bool, video_style: str) -> str:
+    script = analysis.get("script") or {}
+    reference = analysis.get("reference_analysis") or {}
+    title = str(script.get("title") or reference.get("title") or "参照動画の要点解説").strip()
     payload = {
         "title": title,
-        "news_items": [{"title": title, "content": content, "url": url, "source_name": "Kurage Montage"}],
+        "script": script,
+        "source_url": url,
+        "source_title": title,
+        "source_name": "Kurage Montage",
+        "source_platform": kind,
+        "source": "kmontage",
         "vtuber_mode": vtuber_mode,
         "video_style": video_style,
     }
-    res = requests.post(f"{KURAGE_API}/generate_from_news", json=payload, timeout=60)
+    res = requests.post(f"{KURAGE_API}/generate_from_script", json=payload, timeout=60)
     res.raise_for_status()
     data = res.json()
     kurage_job_id = data.get("job_id")
@@ -371,6 +495,21 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
             "video_url": f"https://kurage.exbridge.jp/kuragev.php?id={kurage_job_id}",
             "kurage_video_endpoint": f"{KURAGE_API}/video/{kurage_job_id}",
         })
+        try:
+            report = {
+                "job_id": job.get("id"),
+                "kurage_job_id": kurage_job_id,
+                "video_url": updates["video_url"],
+                "status": "done",
+                "has_script": bool(status.get("script")),
+                "scene_count": len((status.get("script") or {}).get("scenes") or []),
+                "completed_at": now(),
+            }
+            job_dir = JOBS_DIR / str(job.get("id"))
+            job_dir.mkdir(parents=True, exist_ok=True)
+            (job_dir / "render_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     elif status.get("status") == "error":
         updates.update({"status": "error", "error": status.get("error") or "Kurage generation failed"})
     else:
@@ -405,7 +544,20 @@ def process_job(job_id: str) -> None:
 
         save_job(job_id, status="planning", progress=45)
         analysis = analyze_reference(url, kind, meta, transcript, job_dir)
-        save_job(job_id, analysis=analysis, title=analysis.get("title"), summary=analysis.get("summary"), script_outline=analysis.get("script_outline") or [])
+        reference = analysis.get("reference_analysis") or {}
+        scene_plan = analysis.get("scene_plan") or {}
+        script = analysis.get("script") or {}
+        summary = reference.get("core_claim") or "参照動画の要点を忠実に整理しています。"
+        save_job(
+            job_id,
+            analysis=analysis,
+            reference_analysis=reference,
+            scene_plan=scene_plan,
+            script=script,
+            title=script.get("title") or scene_plan.get("title") or reference.get("title"),
+            summary=summary,
+            script_outline=[s.get("message") or s.get("role") for s in (scene_plan.get("scenes") or []) if isinstance(s, dict)],
+        )
 
         save_job(job_id, status="generating", progress=55)
         kurage_job_id = enqueue_kurage(job_id, url, kind, analysis, bool(job.get("vtuber_mode", True)), str(job.get("video_style") or "ai_avatar_explainer"))

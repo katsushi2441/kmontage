@@ -11,7 +11,7 @@ function setActions(enabled) {
 }
 
 function scriptLines(job) {
-  const script = job.kurage_script || {};
+  const script = job.kurage_script || job.script || {};
   const scenes = Array.isArray(script.scenes) ? script.scenes : [];
   if (scenes.length) return scenes.map((s) => s.narration || '').filter(Boolean);
   const outline = Array.isArray(job.script_outline) ? job.script_outline : [];
@@ -22,7 +22,7 @@ function renderJob(job) {
   currentJobId = job.id;
   $('status').textContent = `${job.status || 'unknown'} ${job.progress ?? 0}%`;
   $('title').textContent = job.kurage_title || job.title || '生成中';
-  $('summary').textContent = job.summary || job.analysis?.summary || job.transcript_preview || '解析中です。';
+  $('summary').textContent = job.summary || job.reference_analysis?.core_claim || job.analysis?.reference_analysis?.core_claim || job.analysis?.summary || job.transcript_preview || '解析中です。';
   const list = $('script');
   list.innerHTML = '';
   for (const line of scriptLines(job)) {

@@ -13,9 +13,15 @@ Kurage Montage (`kmontage`) turns a reference X or YouTube video URL into a Japa
 
 1. User inputs an X URL or YouTube URL.
 2. `yt-dlp` reads metadata, captions, and when needed downloads the reference video.
-3. Captions or Whisper transcription are summarized by Ollama into a Japanese production plan.
-4. The generated summary is sent to Kurage `/generate_from_news` with VTuber mode enabled.
+3. Captions or Whisper transcription are analyzed by Ollama into OpenMontage-style artifacts:
+   `reference_analysis.json`, `scene_plan.json`, `script.json`, and `qa.json`.
+4. The completed script is sent to Kurage `/generate_from_script` with VTuber mode enabled.
 5. The resulting video appears in `kuragev.php` because Kurage owns the final job JSON/video.
+
+`/generate_from_news` is intentionally not used for kmontage reference-video jobs.
+It can rewrite the source into a generic news explainer and dilute concrete
+numbers, tools, workflow steps, and risks from the original video. kmontage must
+produce the faithful script first, then ask Kurage only to render it.
 
 ## Run
 
@@ -56,3 +62,10 @@ fxtwitter API から動画URLを取得し、Whisperは KurageVP と同じ CUDA/f
 ## Notes
 
 OpenMontage is AGPL-3.0 and is kept as a reference clone. Kurage Montage does not vendor OpenMontage code into the product path; it implements a Kurage-specific reference-video explainer workflow.
+
+Useful OpenMontage ideas adopted in kmontage:
+
+- Save intermediate artifacts instead of jumping straight to rendering.
+- Separate reference analysis, scene planning, final script, and render QA.
+- Keep source-basis notes so generated videos can be audited for faithfulness.
+- Treat generic, abstract summaries as failures for reference-video jobs.
