@@ -3,6 +3,7 @@ OpenMontage/
 __pycache__/
 *.pyc
 storage/tmp/
+storage/
 storage/jobs/*/media/
 storage/jobs/*/*.mp4
 storage/jobs/*/*.mp3

@@ -21,7 +21,7 @@ Kurage Montage (`kmontage`) turns a reference X or YouTube video URL into a Japa
 
 ```bash
 cd /home/kojima/work/kmontage
-python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 18305
+/home/kojima/work/kuragevp/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 18305
 ```
 
 Open:
@@ -36,8 +36,10 @@ http://localhost:18305/
 KURAGE_API=http://127.0.0.1:18303
 OLLAMA_URL=http://192.168.0.3:11434
 OLLAMA_MODEL=gemma4:12b-it-qat
-KMONTAGE_TRANSCRIBE_PYTHON=/home/kojima/work/kuragevp/.venv/bin/python
-KMONTAGE_TRANSCRIBE_MODEL=small
+KURAGEVP_BACKEND_DIR=/home/kojima/work/kuragevp/backend
+KURAGEVP_WHISPER_DEVICE=cuda
+KURAGEVP_WHISPER_COMPUTE_TYPE=float16
+LD_LIBRARY_PATH=/home/kojima/work/kuragevp/.venv/lib/python3.10/site-packages/nvidia/cublas/lib:/home/kojima/work/kuragevp/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/home/kojima/work/kuragevp/.venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib
 KMONTAGE_YTDLP_COOKIES_BROWSER=chrome
 # or
 KMONTAGE_YTDLP_COOKIES_FILE=/path/to/cookies.txt
@@ -46,6 +48,10 @@ KMONTAGE_YTDLP_COOKIES_FILE=/path/to/cookies.txt
 X動画は未ログイン状態だと取得できないことがあります。その場合は、認証済みブラウザを使っている環境で
 `KMONTAGE_YTDLP_COOKIES_BROWSER=chrome` か、書き出したCookieファイルを
 `KMONTAGE_YTDLP_COOKIES_FILE` に指定します。
+
+X動画の取得、音声抽出、文字起こしは Kurage Voice Pro の既存実装
+`kuragevp/backend/pipeline.py` を再利用します。X動画は `yt-dlp` ではなく
+fxtwitter API から動画URLを取得し、Whisperは KurageVP と同じ CUDA/float16 構成で動かします。
 
 ## Notes
 

@@ -8,9 +8,13 @@ WorkingDirectory=/home/kojima/work/kmontage
 Environment=KURAGE_API=http://127.0.0.1:18303
 Environment=OLLAMA_URL=http://192.168.0.3:11434
 Environment=OLLAMA_MODEL=gemma4:12b-it-qat
+Environment=KURAGEVP_BACKEND_DIR=/home/kojima/work/kuragevp/backend
+Environment=KURAGEVP_WHISPER_DEVICE=cuda
+Environment=KURAGEVP_WHISPER_COMPUTE_TYPE=float16
+Environment=LD_LIBRARY_PATH=/home/kojima/work/kuragevp/.venv/lib/python3.10/site-packages/nvidia/cublas/lib:/home/kojima/work/kuragevp/.venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/home/kojima/work/kuragevp/.venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib
 # X動画の取得にログインCookieが必要な場合だけ有効化する。
 # Environment=KMONTAGE_YTDLP_COOKIES_BROWSER=chrome
-ExecStart=/usr/bin/python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 18305
+ExecStart=/home/kojima/work/kuragevp/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 18305
 Restart=always
 RestartSec=5
 

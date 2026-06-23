@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -31,9 +32,8 @@ YTDLP_COOKIES_FILE = os.environ.get("KMONTAGE_YTDLP_COOKIES_FILE", "")
 YTDLP_COOKIES_BROWSER = os.environ.get("KMONTAGE_YTDLP_COOKIES_BROWSER", "")
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
-TRANSCRIBE_PYTHON = os.environ.get("KMONTAGE_TRANSCRIBE_PYTHON", "/home/kojima/work/kuragevp/.venv/bin/python")
-TRANSCRIBE_MODEL = os.environ.get("KMONTAGE_TRANSCRIBE_MODEL", "small")
 ENABLE_TRANSCRIBE = os.environ.get("KMONTAGE_ENABLE_TRANSCRIBE", "1").lower() not in {"0", "false", "no"}
+KURAGEVP_BACKEND_DIR = Path(os.environ.get("KURAGEVP_BACKEND_DIR", "/home/kojima/work/kuragevp/backend"))
 
 app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -93,6 +93,15 @@ def ytdlp_args(*extra: str) -> list[str]:
         args.extend(["--cookies-from-browser", YTDLP_COOKIES_BROWSER])
     args.extend(extra)
     return args
+
+
+def kuragevp_pipeline():
+    backend_dir = str(KURAGEVP_BACKEND_DIR)
+    if backend_dir not in sys.path:
+        sys.path.insert(0, backend_dir)
+    import pipeline  # type: ignore
+
+    return pipeline
 
 
 def url_kind(url: str) -> str:
@@ -183,9 +192,16 @@ def captions_from_metadata(meta: dict[str, Any]) -> str:
     return ""
 
 
-def download_reference_video(url: str, job_dir: Path) -> Path | None:
+def download_reference_video(url: str, job_dir: Path, kind: str) -> Path | None:
     media_dir = job_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
+    if kind == "x":
+        try:
+            return kuragevp_pipeline().download_video(url, media_dir)
+        except Exception as exc:
+            (job_dir / "download_warning.log").write_text(str(exc), encoding="utf-8")
+            return None
+
     out_tmpl = str(media_dir / "source.%(ext)s")
     result = run_cmd(ytdlp_args(
         "--no-playlist",
@@ -210,23 +226,25 @@ def media_duration(path: Path) -> float:
 
 
 def transcribe_video(video_path: Path, job_dir: Path) -> str:
-    if not ENABLE_TRANSCRIBE or not Path(TRANSCRIBE_PYTHON).exists():
-        return ""
-    audio = job_dir / "media" / "audio.wav"
-    result = run_cmd([FFMPEG_BIN, "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(audio)], timeout=300)
-    if result.returncode != 0 or not audio.exists():
-        return ""
-    worker = Path(__file__).with_name("transcribe_worker.py")
-    result = run_cmd([TRANSCRIBE_PYTHON, str(worker), str(audio), TRANSCRIBE_MODEL], timeout=1200)
-    if result.returncode != 0:
-        (job_dir / "transcribe_error.log").write_text(result.stderr + "\n" + result.stdout, encoding="utf-8")
+    if not ENABLE_TRANSCRIBE:
         return ""
     try:
-        data = json.loads(result.stdout)
-    except Exception:
+        pipeline = kuragevp_pipeline()
+        media_dir = job_dir / "media"
+        audio = pipeline.extract_audio(video_path, media_dir)
+        source_srt, source_txt = pipeline.transcribe_audio(audio, media_dir, "auto")
+        text = Path(source_txt).read_text(encoding="utf-8").strip()
+        (job_dir / "transcript.json").write_text(json.dumps({
+            "ok": True,
+            "source": "kuragevp.pipeline.transcribe_audio",
+            "srt": str(source_srt),
+            "txt": str(source_txt),
+            "text": text,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return text
+    except Exception as exc:
+        (job_dir / "transcribe_error.log").write_text(str(exc), encoding="utf-8")
         return ""
-    (job_dir / "transcript.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(data.get("text") or "").strip()
 
 
 def build_analysis_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str) -> str:
@@ -375,7 +393,7 @@ def process_job(job_id: str) -> None:
         video_path = None
         if len(transcript) < 80:
             save_job(job_id, status="downloading", progress=30)
-            video_path = download_reference_video(url, job_dir)
+            video_path = download_reference_video(url, job_dir, kind)
             if video_path:
                 save_job(job_id, reference_video=str(video_path), reference_duration=media_duration(video_path))
                 save_job(job_id, status="transcribing", progress=38)
