@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.parse import urljoin
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -129,6 +130,27 @@ def extract_vtt_text(vtt: str) -> str:
     return " ".join(lines)
 
 
+def extract_m3u8_vtt_text(playlist: str, playlist_url: str) -> str:
+    """X/Twitter may expose subtitles as an HLS playlist that points to VTT."""
+    candidates = []
+    for raw in playlist.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ".vtt" in line.lower():
+            candidates.append(urljoin(playlist_url, line))
+    for url in candidates:
+        try:
+            res = requests.get(url, timeout=30)
+            res.raise_for_status()
+            text = extract_vtt_text(res.text)
+            if len(text) >= 40:
+                return text
+        except Exception:
+            continue
+    return ""
+
+
 def extract_json3_text(raw: str) -> str:
     try:
         data = json.loads(raw)
@@ -178,7 +200,10 @@ def captions_from_metadata(meta: dict[str, Any]) -> str:
                     res = requests.get(track_url, timeout=30)
                     res.raise_for_status()
                     if ext == "vtt":
-                        text = extract_vtt_text(res.text)
+                        if res.text.lstrip().startswith("#EXTM3U"):
+                            text = extract_m3u8_vtt_text(res.text, track_url)
+                        else:
+                            text = extract_vtt_text(res.text)
                     elif ext == "json3":
                         text = extract_json3_text(res.text)
                     else:
@@ -359,7 +384,7 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
             "reference_analysis": {
                 "title": f"{title} 要点解説",
                 "core_claim": base[:200],
-                "evidence_numbers": re.findall(r"(?:\\$?\\d[\\d,.]*\\s?(?:ドル|円|views?|再生|K|万|%|RPM)?)", base)[:8],
+                "evidence_numbers": re.findall(r"(?:\$?\d[\d,.]*\s?(?:ドル|円|views?|再生|K|万|%|RPM)?)", base)[:8],
                 "workflow_steps": points[:6],
                 "tools_or_methods": [],
                 "risks": [],
