@@ -16,6 +16,12 @@ Kurage Montage (`kmontage`) turns a reference X or YouTube video URL into a Japa
 3. Captions or Whisper transcription are analyzed by Ollama into OpenMontage-style artifacts:
    `reference_analysis.json`, `scene_plan.json`, `script.json`, and `qa.json`.
 4. The completed script is sent to Kurage `/generate_from_script` with VTuber mode enabled.
+
+Before enqueueing to Kurage, kmontage now applies a Japanese quality gate. If
+the generated title or narration remains English, or if the script has too few
+scenes, the backend asks Ollama to rebuild the analysis as a Japanese 12-scene
+short script. If the repaired script still fails the Japanese check, the job is
+stopped instead of publishing an English video.
 5. The resulting video appears in `kuragev.php` because Kurage owns the final job JSON/video.
 
 `/generate_from_news` is intentionally not used for kmontage reference-video jobs.

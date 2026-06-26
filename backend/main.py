@@ -395,8 +395,157 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
             "qa": {"concrete_facts_used": points[:4], "omitted_topics": [], "faithfulness_note": "fallback from transcript"},
         }
     analysis = normalize_reference_analysis(analysis, meta, transcript)
+    if needs_japanese_repair(analysis):
+        repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir)
+        analysis = normalize_reference_analysis(repaired, meta, transcript)
+    if needs_japanese_repair(analysis):
+        (job_dir / "japanese_quality_error.json").write_text(json.dumps({
+            "reason": "script_is_not_japanese_enough",
+            "title": (analysis.get("script") or {}).get("title"),
+            "scene_count": len(((analysis.get("script") or {}).get("scenes") or [])),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise RuntimeError("日本語ショート台本の生成に失敗しました。英語台本のままKurageへ送信しないため停止しました。")
     write_openmontage_artifacts(job_dir, analysis)
     return analysis
+
+
+def japanese_chars(text: str) -> int:
+    return sum(1 for ch in text if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff")
+
+
+def ascii_letters(text: str) -> int:
+    return sum(1 for ch in text if ch.isascii() and ch.isalpha())
+
+
+def text_looks_english(text: str) -> bool:
+    text = str(text or "").strip()
+    if not text:
+        return False
+    jp = japanese_chars(text)
+    en = ascii_letters(text)
+    return en >= 35 and en > max(12, jp * 2)
+
+
+def needs_japanese_repair(analysis: dict[str, Any]) -> bool:
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    title = str(script.get("title") or "")
+    narrations = [str(s.get("narration") or "") for s in scenes if isinstance(s, dict)]
+    joined = "\n".join([title] + narrations)
+    if len(scenes) < 6:
+        return True
+    if text_looks_english(title):
+        return True
+    if any(text_looks_english(n) for n in narrations):
+        return True
+    # A Japanese short should have enough Japanese signal across the script.
+    return japanese_chars(joined) < 180
+
+
+def build_japanese_repair_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any]) -> str:
+    title = meta.get("title") or "参照動画"
+    uploader = meta.get("uploader") or meta.get("channel") or ""
+    description = meta.get("description") or ""
+    transcript_excerpt = transcript[:14000]
+    if len(transcript) > 18000:
+        transcript_excerpt += "\n\n--- transcript tail ---\n" + transcript[-4000:]
+    previous = json.dumps(analysis, ensure_ascii=False)[:8000]
+    return f"""次の参照動画から、日本語ショート解説動画の台本を作り直してください。
+
+前回の解析結果に英語タイトル・英語ナレーション・シーン不足が混ざりました。今回は必ず日本語で、12シーンの完成台本にしてください。
+
+URL: {url}
+種類: {kind}
+タイトル: {title}
+投稿者: {uploader}
+説明文:
+{description[:1200]}
+
+文字起こし/字幕:
+{transcript_excerpt}
+
+前回解析結果（参考。英語のまま使わず、日本語へ要約し直す）:
+{previous}
+
+必須条件:
+- title、reference_analysis、scene_plan.message、script.scenes[].narration はすべて自然な日本語
+- 英語字幕をそのまま貼り付けない。固有名詞とツール名以外は日本語にする
+- 元動画の数字、手順、収益、ツール、注意点は忠実に残す
+- 60〜120秒の縦型ショート向け、12シーン、各8〜10秒程度
+- image_prompt だけは英語でよい
+- JSONのみで返す
+
+形式:
+{{
+  "reference_analysis": {{
+    "title": "日本語タイトル",
+    "core_claim": "元動画の中心主張を日本語で1文",
+    "evidence_numbers": ["具体的な数字"],
+    "workflow_steps": ["日本語の手順"],
+    "tools_or_methods": ["ツールや方法"],
+    "risks": ["注意点"],
+    "why_it_went_viral": ["伸びた理由"]
+  }},
+  "scene_plan": {{
+    "title": "日本語動画タイトル",
+    "target_duration": 100,
+    "scenes": [{{"index":0,"role":"hook","source_basis":"根拠","message":"日本語の要点"}}]
+  }},
+  "script": {{
+    "title": "日本語動画タイトル",
+    "scenes": [{{"index":0,"narration":"日本語ナレーション","image_prompt":"English vertical 9:16 explainer visual","duration":8}}]
+  }},
+  "qa": {{
+    "concrete_facts_used": ["台本に入れた具体事実"],
+    "omitted_topics": ["省略した要素"],
+    "faithfulness_note": "忠実性の説明"
+  }}
+}}
+"""
+
+
+def repair_analysis_to_japanese(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any], job_dir: Path) -> dict[str, Any]:
+    prompt = build_japanese_repair_prompt(url, kind, meta, transcript, analysis)
+    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.05, "num_predict": 8192}}
+    res = requests.post(ollama_generate_url(), json=payload, timeout=300)
+    res.raise_for_status()
+    response = res.json().get("response") or ""
+    (job_dir / "japanese_repair_response.txt").write_text(response, encoding="utf-8")
+    try:
+        repaired = parse_json_object(response)
+    except Exception as exc:
+        (job_dir / "japanese_repair_error.log").write_text(str(exc), encoding="utf-8")
+        repaired = japanese_extract_fallback(meta, transcript)
+    return repaired
+
+
+def japanese_extract_fallback(meta: dict[str, Any], transcript: str) -> dict[str, Any]:
+    title = str(meta.get("title") or "参照動画").strip()
+    numbers = re.findall(r"\$?\d[\d,.]*\s?(?:ドル|円|views?|再生|K|万|%|RPM|users?|month|months?)?", transcript, flags=re.I)[:10]
+    rough = [p.strip() for p in re.split(r"(?<=[.!?。])\s+|\n+", transcript) if len(p.strip()) > 35][:12]
+    scenes = []
+    for i in range(12):
+        basis = rough[i] if i < len(rough) else (rough[-1] if rough else title)
+        scenes.append({
+            "index": i,
+            "narration": f"元動画の要点です。{basis[:80]}。この内容を日本語で整理すると、具体的な数字と手順を確認することが重要です。",
+            "image_prompt": "Japanese vertical explainer, clean data cards, bright studio",
+            "duration": 8,
+        })
+    return {
+        "reference_analysis": {
+            "title": f"{title} 要点解説",
+            "core_claim": "元動画の主張を日本語で要約できなかったため、抽出字幕をもとに再構成しました。",
+            "evidence_numbers": numbers,
+            "workflow_steps": [s["narration"] for s in scenes[:4]],
+            "tools_or_methods": [],
+            "risks": [],
+            "why_it_went_viral": [],
+        },
+        "scene_plan": {"title": f"{title} 要点解説", "target_duration": 96, "scenes": [{"index": s["index"], "role": "summary", "message": s["narration"], "source_basis": "transcript"} for s in scenes]},
+        "script": {"title": f"{title} 要点解説", "scenes": scenes},
+        "qa": {"concrete_facts_used": numbers, "omitted_topics": [], "faithfulness_note": "Japanese fallback from transcript"},
+    }
 
 
 def normalize_reference_analysis(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> dict[str, Any]:
