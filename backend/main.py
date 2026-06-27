@@ -178,6 +178,58 @@ def fetch_metadata(url: str, job_dir: Path) -> dict[str, Any]:
     return meta
 
 
+def fetch_x_metadata(url: str, job_dir: Path) -> dict[str, Any]:
+    """Fetch X/Twitter metadata through KurageVP's fxtwitter path.
+
+    yt-dlp's Twitter extractor can fail with transient guest-token errors.
+    KurageVP already uses fxtwitter for X videos, so kmontage should not fail
+    before it reaches that working media-download/transcription path.
+    """
+    tweet_id = ""
+    try:
+        tweet_id = kuragevp_pipeline().extract_tweet_id(url)
+        data = kuragevp_pipeline().fetch_fxtwitter(tweet_id)
+    except Exception as exc:
+        (job_dir / "metadata_warning.log").write_text(f"fxtwitter metadata failed: {exc}", encoding="utf-8")
+        data = {}
+    tweet = data.get("tweet") if isinstance(data.get("tweet"), dict) else {}
+    author = tweet.get("author") if isinstance(tweet.get("author"), dict) else {}
+    text = str(tweet.get("text") or "").strip()
+    author_name = str(author.get("name") or author.get("screen_name") or author.get("username") or "X").strip()
+    uploader = "@" + str(author.get("screen_name") or author.get("username") or "X").lstrip("@")
+    title = text[:90] if text else f"X動画 {tweet_id}".strip()
+    meta = {
+        "id": tweet_id,
+        "webpage_url": url,
+        "original_url": url,
+        "extractor": "fxtwitter",
+        "title": title or "X動画",
+        "description": text,
+        "uploader": uploader,
+        "channel": author_name,
+        "duration": 0,
+        "subtitles": {},
+        "automatic_captions": {},
+    }
+    (job_dir / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    if data:
+        (job_dir / "fxtwitter.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
+
+
+def fetch_reference_metadata(url: str, kind: str, job_dir: Path) -> dict[str, Any]:
+    try:
+        return fetch_metadata(url, job_dir)
+    except Exception as exc:
+        (job_dir / "metadata_warning.log").write_text(str(exc), encoding="utf-8")
+        if kind == "x":
+            meta = fetch_x_metadata(url, job_dir)
+            meta["metadata_fallback_reason"] = str(exc)
+            (job_dir / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            return meta
+        raise
+
+
 def captions_from_metadata(meta: dict[str, Any]) -> str:
     pools = []
     for key in ("subtitles", "automatic_captions"):
@@ -699,7 +751,7 @@ def process_job(job_id: str) -> None:
     try:
         kind = url_kind(url)
         save_job(job_id, status="analyzing", progress=10, kind=kind)
-        meta = fetch_metadata(url, job_dir)
+        meta = fetch_reference_metadata(url, kind, job_dir)
         transcript = captions_from_metadata(meta)
         save_job(job_id, progress=25, source_title=meta.get("title"), source_uploader=meta.get("uploader") or meta.get("channel"), transcript_preview=transcript[:500])
 
