@@ -266,7 +266,7 @@ def fetch_x_metadata(url: str, job_dir: Path) -> dict[str, Any]:
         "description": description,
         "uploader": uploader,
         "channel": author_name,
-        "duration": 0,
+        "duration": max([float(v.get("duration") or 0) for v in (media.get("videos") or [])] or [0]),
         "media_count": len(media.get("videos") or []) + len(media.get("photos") or []),
         "has_video_media": bool(media.get("videos")),
         "has_article": bool(article_text or article_title),
@@ -1067,13 +1067,21 @@ def process_job(job_id: str) -> None:
         save_job(job_id, progress=25, source_title=meta.get("title"), source_uploader=meta.get("uploader") or meta.get("channel"), transcript_preview=transcript[:500])
 
         video_path = None
-        if is_video_kind(kind) and (kind != "x" or meta.get("has_video_media")) and len(transcript) < 80:
+        should_transcribe_x_video = (
+            kind == "x"
+            and bool(meta.get("has_video_media"))
+            and float(meta.get("duration") or 0) >= 20
+        )
+        if is_video_kind(kind) and (kind != "x" or meta.get("has_video_media")) and (len(transcript) < 80 or should_transcribe_x_video):
+            pre_video_text = transcript
             save_job(job_id, status="downloading", progress=30)
             video_path = download_reference_video(url, job_dir, kind)
             if video_path:
                 save_job(job_id, reference_video=str(video_path), reference_duration=media_duration(video_path))
                 save_job(job_id, status="transcribing", progress=38)
-                transcript = transcribe_video(video_path, job_dir) or transcript
+                video_transcript = transcribe_video(video_path, job_dir)
+                if video_transcript:
+                    transcript = clean_extracted_text("\n\n".join(p for p in [pre_video_text, video_transcript] if p))
         save_job(job_id, transcript_preview=transcript[:1000])
 
         if not transcript and not (meta.get("description") or meta.get("title")):
