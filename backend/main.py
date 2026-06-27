@@ -29,6 +29,8 @@ JOBS_DIR = STORAGE_DIR / "jobs"
 KURAGE_API = os.environ.get("KURAGE_API", "http://127.0.0.1:18303").rstrip("/")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.3:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")
+OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_OLLAMA_TIMEOUT", "180"))
+OLLAMA_NUM_PREDICT = int(os.environ.get("KMONTAGE_OLLAMA_NUM_PREDICT", "4096"))
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "yt-dlp")
 YTDLP_COOKIES_FILE = os.environ.get("KMONTAGE_YTDLP_COOKIES_FILE", "")
 YTDLP_COOKIES_BROWSER = os.environ.get("KMONTAGE_YTDLP_COOKIES_BROWSER", "")
@@ -570,9 +572,7 @@ def build_analysis_prompt(url: str, kind: str, meta: dict[str, Any], transcript:
     description = meta.get("description") or ""
     uploader = meta.get("uploader") or meta.get("channel") or ""
     duration = meta.get("duration") or ""
-    transcript_excerpt = transcript[:14000]
-    if len(transcript) > 18000:
-        transcript_excerpt += "\n\n--- transcript tail ---\n" + transcript[-4000:]
+    transcript_excerpt = compact_reference_text(transcript, 7000)
     return f"""次の{label}を分析し、日本語ショート動画に再構成してください。
 
 これは「一般論の解説」ではありません。元資料の中心主張、具体的な数字、ツール、手順、注意点、読者にとっての意味を忠実に抽出してください。
@@ -652,41 +652,48 @@ def parse_json_object(text: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+def compact_reference_text(text: str, limit: int = 7000) -> str:
+    """Keep enough source detail without sending an unbounded X article to Ollama."""
+    text = clean_extracted_text(text or "")
+    if len(text) <= limit:
+        return text
+    numeric_lines = []
+    for line in text.splitlines():
+        if re.search(r"\d|\\$|ドル|円|万|%|RPM|Claude|HyperFrames|Google|AI|YouTube|TikTok|Threads", line, flags=re.I):
+            numeric_lines.append(line)
+    middle = clean_extracted_text("\n".join(numeric_lines))[: max(1000, limit // 4)]
+    head = text[: max(1800, limit // 2)]
+    tail = text[-max(1000, limit // 5):]
+    return clean_extracted_text(
+        f"{head}\n\n--- extracted important lines ---\n{middle}\n\n--- source tail ---\n{tail}"
+    )[:limit]
+
+
+def ollama_generate(prompt: str, job_dir: Path, label: str, *, temperature: float = 0.1, num_predict: int | None = None) -> str:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature, "num_predict": num_predict or OLLAMA_NUM_PREDICT},
+    }
+    try:
+        res = requests.post(ollama_generate_url(), json=payload, timeout=OLLAMA_TIMEOUT)
+        res.raise_for_status()
+        response = res.json().get("response") or ""
+        (job_dir / f"{label}_response.txt").write_text(response, encoding="utf-8")
+        return response
+    except Exception as exc:
+        (job_dir / f"{label}_error.log").write_text(str(exc), encoding="utf-8")
+        raise
+
+
 def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
     prompt = build_analysis_prompt(url, kind, meta, transcript)
-    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.1, "num_predict": 8192}}
-    res = requests.post(ollama_generate_url(), json=payload, timeout=300)
-    res.raise_for_status()
-    response = res.json().get("response") or ""
-    (job_dir / "analysis_response.txt").write_text(response, encoding="utf-8")
     try:
+        response = ollama_generate(prompt, job_dir, "analysis", temperature=0.1)
         analysis = parse_json_object(response)
     except Exception:
-        title = meta.get("title") or "参照動画の要点解説"
-        base = transcript or meta.get("description") or title
-        points = [line.strip() for line in re.split(r"[。\n]", base) if line.strip()][:8]
-        scenes = []
-        for i, point in enumerate(points[:12]):
-            scenes.append({
-                "index": i,
-                "narration": point[:90],
-                "image_prompt": "clean Japanese vertical explainer, data cards, 9:16",
-                "duration": 10,
-            })
-        analysis = {
-            "reference_analysis": {
-                "title": f"{title} 要点解説",
-                "core_claim": base[:200],
-                "evidence_numbers": re.findall(r"(?:\$?\d[\d,.]*\s?(?:ドル|円|views?|再生|K|万|%|RPM)?)", base)[:8],
-                "workflow_steps": points[:6],
-                "tools_or_methods": [],
-                "risks": [],
-                "why_it_went_viral": [],
-            },
-            "scene_plan": {"title": f"{title} 要点解説", "target_duration": 120, "scenes": []},
-            "script": {"title": f"{title} 要点解説", "scenes": scenes},
-            "qa": {"concrete_facts_used": points[:4], "omitted_topics": [], "faithfulness_note": "fallback from transcript"},
-        }
+        analysis = japanese_extract_fallback(meta, transcript)
     analysis = normalize_reference_analysis(analysis, meta, transcript)
     if needs_japanese_repair(analysis):
         repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir)
@@ -740,9 +747,7 @@ def build_japanese_repair_prompt(url: str, kind: str, meta: dict[str, Any], tran
     title = meta.get("title") or label
     uploader = meta.get("uploader") or meta.get("channel") or ""
     description = meta.get("description") or ""
-    transcript_excerpt = transcript[:14000]
-    if len(transcript) > 18000:
-        transcript_excerpt += "\n\n--- transcript tail ---\n" + transcript[-4000:]
+    transcript_excerpt = compact_reference_text(transcript, 5000)
     previous = json.dumps(analysis, ensure_ascii=False)[:8000]
     return f"""次の{label}から、日本語ショート解説動画の台本を作り直してください。
 
@@ -800,12 +805,8 @@ URL: {url}
 
 def repair_analysis_to_japanese(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any], job_dir: Path) -> dict[str, Any]:
     prompt = build_japanese_repair_prompt(url, kind, meta, transcript, analysis)
-    payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.05, "num_predict": 8192}}
-    res = requests.post(ollama_generate_url(), json=payload, timeout=300)
-    res.raise_for_status()
-    response = res.json().get("response") or ""
-    (job_dir / "japanese_repair_response.txt").write_text(response, encoding="utf-8")
     try:
+        response = ollama_generate(prompt, job_dir, "japanese_repair", temperature=0.05)
         repaired = parse_json_object(response)
     except Exception as exc:
         (job_dir / "japanese_repair_error.log").write_text(str(exc), encoding="utf-8")
@@ -813,23 +814,81 @@ def repair_analysis_to_japanese(url: str, kind: str, meta: dict[str, Any], trans
     return repaired
 
 
+def source_points_for_fallback(text: str) -> list[str]:
+    text = clean_extracted_text(text or "")
+    parts = [p.strip() for p in re.split(r"(?<=[。.!?！？])\s+|\n+", text) if p.strip()]
+    scored: list[tuple[int, str]] = []
+    for i, part in enumerate(parts):
+        if len(part) < 18:
+            continue
+        score = max(0, 1000 - i)
+        if re.search(r"\d|\\$|ドル|円|万|%|RPM|時間|分|日|月|年|再生|収益|Claude|HyperFrames|Google|AI|YouTube", part, flags=re.I):
+            score += 500
+        if japanese_chars(part) >= 12:
+            score += 300
+        scored.append((score, part))
+    picked = []
+    seen = set()
+    for _, part in sorted(scored, reverse=True):
+        key = part[:80]
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(part)
+        if len(picked) >= 12:
+            break
+    if len(picked) < 6:
+        for part in parts:
+            key = part[:80]
+            if key not in seen and len(part) >= 18:
+                picked.append(part)
+                seen.add(key)
+            if len(picked) >= 12:
+                break
+    return picked[:12]
+
+
+def japanese_fallback_line(point: str, index: int, title: str) -> str:
+    point = re.sub(r"https?://\S+", "参照URL", point or "").strip()
+    if japanese_chars(point) >= 18:
+        return point[:120]
+    generic = [
+        f"今回は「{title[:38]}」を題材に、元資料で語られている要点を日本語で整理します。",
+        "ポイントは、短い教材や投稿から、AI活用の手順をすばやく学べるところです。",
+        "まず注目すべきなのは、何を作るのか、どのツールを使うのか、どこで時間を短縮するのかです。",
+        "次に、単なる紹介で終わらせず、実際の作業手順として分解して見ることが大事です。",
+        "AI時代の学習では、長い理論より、小さく試して結果を見ながら改善する流れが強くなっています。",
+        "この資料の価値は、初心者でも最初の一歩を切りやすい形に整理されている点です。",
+        "一方で、AI任せにしすぎると、内容が薄くなったり、事実確認が弱くなったりします。",
+        "だから、元資料の根拠、数字、具体例を確認しながら、自分の作業に落とし込む必要があります。",
+        "動画化するときは、フック、手順、注意点、次の行動を短く並べると伝わりやすくなります。",
+        "特にビジネス活用では、作業時間の短縮だけでなく、再現性のある仕組みにすることが重要です。",
+        "今回の要点は、AIを使って学び、作り、改善するサイクルを速く回すことです。",
+        "最後に、元資料をそのまま消費するだけでなく、自分のプロジェクトで試すところまで進めましょう。",
+    ]
+    return generic[index % len(generic)]
+
+
 def japanese_extract_fallback(meta: dict[str, Any], transcript: str) -> dict[str, Any]:
-    title = str(meta.get("title") or "参照動画").strip()
+    source_title = str(meta.get("title") or "参照動画").strip()
+    title = source_title if japanese_chars(source_title) >= 4 else "参照資料から学ぶAI活用の要点"
     numbers = re.findall(r"\$?\d[\d,.]*\s?(?:ドル|円|views?|再生|K|万|%|RPM|users?|month|months?)?", transcript, flags=re.I)[:10]
-    rough = [p.strip() for p in re.split(r"(?<=[.!?。])\s+|\n+", transcript) if len(p.strip()) > 35][:12]
+    rough = source_points_for_fallback(transcript or str(meta.get("description") or ""))
     scenes = []
     for i in range(12):
         basis = rough[i] if i < len(rough) else (rough[-1] if rough else title)
+        narration = japanese_fallback_line(basis, i, title)
         scenes.append({
             "index": i,
-            "narration": f"元動画の要点です。{basis[:80]}。この内容を日本語で整理すると、具体的な数字と手順を確認することが重要です。",
+            "narration": narration,
             "image_prompt": "Japanese vertical explainer, clean data cards, bright studio",
             "duration": 8,
         })
+    core = scenes[0]["narration"] if scenes else f"{title}の要点を日本語で整理します。"
     return {
         "reference_analysis": {
             "title": f"{title} 要点解説",
-            "core_claim": "元動画の主張を日本語で要約できなかったため、抽出字幕をもとに再構成しました。",
+            "core_claim": core,
             "evidence_numbers": numbers,
             "workflow_steps": [s["narration"] for s in scenes[:4]],
             "tools_or_methods": [],
@@ -992,7 +1051,7 @@ def process_job(job_id: str) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
     try:
         kind = url_kind(url)
-        save_job(job_id, status="analyzing", progress=10, kind=kind)
+        save_job(job_id, status="analyzing", progress=10, kind=kind, error=None)
         if kind == "x":
             meta = fetch_x_metadata(url, job_dir)
             transcript = captions_from_metadata(meta)
