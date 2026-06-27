@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -106,12 +107,59 @@ def kuragevp_pipeline():
 
 
 def url_kind(url: str) -> str:
-    host = urlparse(url).netloc.lower()
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if path.endswith(".pdf"):
+        return "pdf"
     if "youtube.com" in host or "youtu.be" in host:
         return "youtube"
     if host in {"x.com", "twitter.com", "mobile.twitter.com"} or host.endswith(".x.com") or host.endswith(".twitter.com"):
         return "x"
-    return "video"
+    return "article"
+
+
+def is_video_kind(kind: str) -> bool:
+    return kind in {"x", "youtube", "video"}
+
+
+def source_label(kind: str) -> str:
+    if kind == "pdf":
+        return "PDF資料"
+    if kind == "article":
+        return "記事/ブログ"
+    if kind == "x":
+        return "X投稿/記事"
+    return "参照動画"
+
+
+def clean_extracted_text(text: str) -> str:
+    text = re.sub(r"\r", "\n", text or "")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    lines = []
+    seen = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            if lines and lines[-1]:
+                lines.append("")
+            continue
+        if len(line) <= 2:
+            continue
+        key = line[:180]
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def jina_reader_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return url
+    return "https://r.jina.ai/" + url
 
 
 def extract_vtt_text(vtt: str) -> str:
@@ -194,20 +242,32 @@ def fetch_x_metadata(url: str, job_dir: Path) -> dict[str, Any]:
         data = {}
     tweet = data.get("tweet") if isinstance(data.get("tweet"), dict) else {}
     author = tweet.get("author") if isinstance(tweet.get("author"), dict) else {}
+    media = tweet.get("media") if isinstance(tweet.get("media"), dict) else {}
+    article = tweet.get("article") if isinstance(tweet.get("article"), dict) else {}
+    article_title = str(article.get("title") or "").strip()
+    article_preview = str(article.get("preview_text") or "").strip()
+    article_text = extract_fxtwitter_article_text(article)
     text = str(tweet.get("text") or "").strip()
+    if not text:
+        raw_text = tweet.get("raw_text") if isinstance(tweet.get("raw_text"), dict) else {}
+        text = str(raw_text.get("text") or "").strip()
+    description = clean_extracted_text("\n\n".join(p for p in [text, article_preview, article_text] if p))
     author_name = str(author.get("name") or author.get("screen_name") or author.get("username") or "X").strip()
     uploader = "@" + str(author.get("screen_name") or author.get("username") or "X").lstrip("@")
-    title = text[:90] if text else f"X動画 {tweet_id}".strip()
+    title = article_title or (text[:90] if text else f"X投稿 {tweet_id}".strip())
     meta = {
         "id": tweet_id,
         "webpage_url": url,
         "original_url": url,
         "extractor": "fxtwitter",
-        "title": title or "X動画",
-        "description": text,
+        "title": title or "X投稿",
+        "description": description,
         "uploader": uploader,
         "channel": author_name,
         "duration": 0,
+        "media_count": len(media.get("videos") or []) + len(media.get("photos") or []),
+        "has_video_media": bool(media.get("videos")),
+        "has_article": bool(article_text or article_title),
         "subtitles": {},
         "automatic_captions": {},
     }
@@ -215,6 +275,27 @@ def fetch_x_metadata(url: str, job_dir: Path) -> dict[str, Any]:
     if data:
         (job_dir / "fxtwitter.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return meta
+
+
+def extract_fxtwitter_article_text(article: dict[str, Any]) -> str:
+    parts = []
+    title = str(article.get("title") or "").strip()
+    preview = str(article.get("preview_text") or "").strip()
+    if title:
+        parts.append(title)
+    if preview:
+        parts.append(preview)
+    content = article.get("content") if isinstance(article.get("content"), dict) else {}
+    blocks = content.get("blocks") if isinstance(content.get("blocks"), list) else []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        text = str(block.get("text") or "").strip()
+        block_type = str(block.get("type") or "")
+        if not text or block_type == "atomic":
+            continue
+        parts.append(text)
+    return clean_extracted_text("\n".join(parts))
 
 
 def fetch_reference_metadata(url: str, kind: str, job_dir: Path) -> dict[str, Any]:
@@ -227,6 +308,165 @@ def fetch_reference_metadata(url: str, kind: str, job_dir: Path) -> dict[str, An
             meta["metadata_fallback_reason"] = str(exc)
             (job_dir / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
             return meta
+        raise
+
+
+def html_metadata_and_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    headers = {"User-Agent": "Mozilla/5.0 KurageMontage/1.0"}
+    res = requests.get(url, headers=headers, timeout=40)
+    res.raise_for_status()
+    content_type = res.headers.get("content-type", "")
+    if "pdf" in content_type.lower():
+        pdf_path = job_dir / "source.pdf"
+        pdf_path.write_bytes(res.content)
+        meta = {
+            "id": Path(urlparse(url).path).name or "pdf",
+            "webpage_url": url,
+            "original_url": url,
+            "extractor": "pdf",
+            "title": Path(urlparse(url).path).name or "PDF資料",
+            "description": "",
+            "uploader": urlparse(url).netloc,
+            "channel": urlparse(url).netloc,
+            "duration": 0,
+        }
+        return meta, extract_pdf_text(pdf_path, job_dir)
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg", "form", "nav", "footer", "header", "aside"]):
+        tag.decompose()
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+    og_title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"})
+    if og_title and og_title.get("content"):
+        title = str(og_title.get("content")).strip()
+    description = ""
+    desc_tag = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", property="og:description")
+    if desc_tag and desc_tag.get("content"):
+        description = str(desc_tag.get("content")).strip()
+    article = soup.find("article") or soup.find("main") or soup.body or soup
+    headings = " ".join(h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2"])[:8])
+    paragraphs = [p.get_text(" ", strip=True) for p in article.find_all(["p", "li", "blockquote"])]
+    text = clean_extracted_text("\n".join([title, description, headings, *paragraphs]))
+    meta = {
+        "id": Path(urlparse(url).path).name or "article",
+        "webpage_url": url,
+        "original_url": url,
+        "extractor": "html",
+        "title": title or url,
+        "description": description,
+        "uploader": urlparse(url).netloc,
+        "channel": urlparse(url).netloc,
+        "duration": 0,
+    }
+    return meta, text
+
+
+def jina_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    reader_url = jina_reader_url(url)
+    res = requests.get(reader_url, timeout=60)
+    res.raise_for_status()
+    raw = res.text
+    (job_dir / "jina_reader.txt").write_text(raw, encoding="utf-8")
+    title = ""
+    m = re.search(r"^Title:\s*(.+)$", raw, flags=re.M)
+    if m:
+        title = m.group(1).strip()
+    markdown = raw
+    marker = "Markdown Content:"
+    if marker in raw:
+        markdown = raw.split(marker, 1)[1]
+    text = clean_extracted_text(markdown)
+    meta = {
+        "id": Path(urlparse(url).path).name or "article",
+        "webpage_url": url,
+        "original_url": url,
+        "extractor": "jina_reader",
+        "title": title or url,
+        "description": text[:500],
+        "uploader": urlparse(url).netloc,
+        "channel": urlparse(url).netloc,
+        "duration": 0,
+    }
+    return meta, text
+
+
+def extract_pdf_text(pdf_path: Path, job_dir: Path) -> str:
+    txt_path = job_dir / "source.txt"
+    result = run_cmd(["pdftotext", "-layout", str(pdf_path), str(txt_path)], timeout=120)
+    if result.returncode == 0 and txt_path.exists():
+        text = clean_extracted_text(txt_path.read_text(encoding="utf-8", errors="ignore"))
+        if len(text) >= 80:
+            return text
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(str(pdf_path))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages[:40])
+        return clean_extracted_text(text)
+    except Exception as exc:
+        (job_dir / "pdf_extract_warning.log").write_text(str(exc), encoding="utf-8")
+    return ""
+
+
+def fetch_pdf_document(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    headers = {"User-Agent": "Mozilla/5.0 KurageMontage/1.0"}
+    res = requests.get(url, headers=headers, timeout=60)
+    res.raise_for_status()
+    pdf_path = job_dir / "source.pdf"
+    pdf_path.write_bytes(res.content)
+    title = Path(urlparse(url).path).name or "PDF資料"
+    meta = {
+        "id": title,
+        "webpage_url": url,
+        "original_url": url,
+        "extractor": "pdf",
+        "title": title,
+        "description": "",
+        "uploader": urlparse(url).netloc,
+        "channel": urlparse(url).netloc,
+        "duration": 0,
+    }
+    return meta, extract_pdf_text(pdf_path, job_dir)
+
+
+def fetch_x_article_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    meta = fetch_x_metadata(url, job_dir)
+    text_parts = [str(meta.get("description") or "").strip()]
+    result = run_cmd(["twitter", "article", url], timeout=60)
+    if result.returncode == 0 and result.stdout.strip():
+        (job_dir / "twitter_article.txt").write_text(result.stdout, encoding="utf-8")
+        text_parts.append(result.stdout.strip())
+    else:
+        (job_dir / "twitter_article_warning.log").write_text((result.stderr or result.stdout)[-4000:], encoding="utf-8")
+    if sum(len(p) for p in text_parts) < 500:
+        try:
+            _, text = jina_text(url, job_dir)
+            text_parts.append(text)
+        except Exception as exc:
+            (job_dir / "jina_warning.log").write_text(str(exc), encoding="utf-8")
+    article_text = clean_extracted_text("\n\n".join(p for p in text_parts if p))
+    if article_text:
+        meta["description"] = article_text[:1200]
+    return meta, article_text
+
+
+def fetch_document_source(url: str, kind: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    try:
+        if kind == "pdf":
+            return fetch_pdf_document(url, job_dir)
+        if kind == "x":
+            return fetch_x_article_text(url, job_dir)
+        return html_metadata_and_text(url, job_dir)
+    except Exception as exc:
+        (job_dir / "document_fetch_warning.log").write_text(str(exc), encoding="utf-8")
+        if kind == "x":
+            meta = fetch_x_metadata(url, job_dir)
+            text = clean_extracted_text(str(meta.get("description") or ""))
+            return meta, text
+        if kind in {"article", "pdf"}:
+            return jina_text(url, job_dir)
         raise
 
 
@@ -325,17 +565,18 @@ def transcribe_video(video_path: Path, job_dir: Path) -> str:
 
 
 def build_analysis_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str) -> str:
-    title = meta.get("title") or "参照動画"
+    label = source_label(kind)
+    title = meta.get("title") or label
     description = meta.get("description") or ""
     uploader = meta.get("uploader") or meta.get("channel") or ""
     duration = meta.get("duration") or ""
     transcript_excerpt = transcript[:14000]
     if len(transcript) > 18000:
         transcript_excerpt += "\n\n--- transcript tail ---\n" + transcript[-4000:]
-    return f"""次の参照動画を分析し、日本語ショート動画に再構成してください。
+    return f"""次の{label}を分析し、日本語ショート動画に再構成してください。
 
-これは「一般論の解説」ではありません。元動画がバズった理由、収益化ノウハウ、具体的な数字、ツール、手順、注意点を忠実に抽出してください。
-元動画にない話は入れないでください。考察を入れる場合は「考察」と明示してください。
+これは「一般論の解説」ではありません。元資料の中心主張、具体的な数字、ツール、手順、注意点、読者にとっての意味を忠実に抽出してください。
+元資料にない話は入れないでください。考察を入れる場合は「考察」と明示してください。
 
 URL: {url}
 種類: {kind}
@@ -345,12 +586,12 @@ URL: {url}
 説明文:
 {description[:1200]}
 
-文字起こし/字幕:
+本文/文字起こし/字幕:
 {transcript_excerpt}
 
 要件:
 - 日本語で出力
-- 元動画を丸ごと転載するのではなく、要点解説・考察にする
+- 元資料を丸ごと転載するのではなく、要点解説・考察にする
 - 視聴者が最初の3秒で何の話かわかるフックを作る
 - 60〜120秒の縦型ショート向け、12シーン、各10秒程度
 - Kurage VTuberが話す想定
@@ -362,7 +603,7 @@ URL: {url}
 - 最終台本は、元動画の要点を忠実に圧縮した内容にする
 
 OpenMontageの設計思想を参考に、次の中間成果物を明示してください。
-- reference_analysis: 元動画の事実、数字、手順、注意点、バズった構造
+- reference_analysis: 元資料の事実、数字、手順、注意点、バズった/読む価値がある構造
 - scene_plan: どの要点をどの順で見せるか
 - script: Kurageがそのまま動画化できる12シーン台本
 
@@ -370,8 +611,8 @@ JSONのみで返してください。
 形式:
 {{
   "reference_analysis": {{
-    "title": "元動画の要点タイトル",
-    "core_claim": "元動画が主張している中心命題",
+    "title": "元資料の要点タイトル",
+    "core_claim": "元資料が主張している中心命題",
     "evidence_numbers": ["30日で3300ドル", "制作費20ドル", "140K再生で700ドル売上"],
     "workflow_steps": ["手順1", "手順2", "手順3"],
     "tools_or_methods": ["Claude", "AI voiceover", "CapCut"],
@@ -495,14 +736,15 @@ def needs_japanese_repair(analysis: dict[str, Any]) -> bool:
 
 
 def build_japanese_repair_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any]) -> str:
-    title = meta.get("title") or "参照動画"
+    label = source_label(kind)
+    title = meta.get("title") or label
     uploader = meta.get("uploader") or meta.get("channel") or ""
     description = meta.get("description") or ""
     transcript_excerpt = transcript[:14000]
     if len(transcript) > 18000:
         transcript_excerpt += "\n\n--- transcript tail ---\n" + transcript[-4000:]
     previous = json.dumps(analysis, ensure_ascii=False)[:8000]
-    return f"""次の参照動画から、日本語ショート解説動画の台本を作り直してください。
+    return f"""次の{label}から、日本語ショート解説動画の台本を作り直してください。
 
 前回の解析結果に英語タイトル・英語ナレーション・シーン不足が混ざりました。今回は必ず日本語で、12シーンの完成台本にしてください。
 
@@ -513,7 +755,7 @@ URL: {url}
 説明文:
 {description[:1200]}
 
-文字起こし/字幕:
+本文/文字起こし/字幕:
 {transcript_excerpt}
 
 前回解析結果（参考。英語のまま使わず、日本語へ要約し直す）:
@@ -522,7 +764,7 @@ URL: {url}
 必須条件:
 - title、reference_analysis、scene_plan.message、script.scenes[].narration はすべて自然な日本語
 - 英語字幕をそのまま貼り付けない。固有名詞とツール名以外は日本語にする
-- 元動画の数字、手順、収益、ツール、注意点は忠実に残す
+- 元資料の数字、手順、収益、ツール、注意点は忠実に残す
 - 60〜120秒の縦型ショート向け、12シーン、各8〜10秒程度
 - image_prompt だけは英語でよい
 - JSONのみで返す
@@ -531,7 +773,7 @@ URL: {url}
 {{
   "reference_analysis": {{
     "title": "日本語タイトル",
-    "core_claim": "元動画の中心主張を日本語で1文",
+    "core_claim": "元資料の中心主張を日本語で1文",
     "evidence_numbers": ["具体的な数字"],
     "workflow_steps": ["日本語の手順"],
     "tools_or_methods": ["ツールや方法"],
@@ -751,12 +993,22 @@ def process_job(job_id: str) -> None:
     try:
         kind = url_kind(url)
         save_job(job_id, status="analyzing", progress=10, kind=kind)
-        meta = fetch_reference_metadata(url, kind, job_dir)
-        transcript = captions_from_metadata(meta)
+        if kind == "x":
+            meta = fetch_x_metadata(url, job_dir)
+            transcript = captions_from_metadata(meta)
+            if len(transcript) < 80 and not meta.get("has_video_media"):
+                meta, transcript = fetch_x_article_text(url, job_dir)
+            elif len(transcript) < 80 and str(meta.get("description") or "").strip():
+                transcript = str(meta.get("description") or "").strip()
+        elif is_video_kind(kind):
+            meta = fetch_reference_metadata(url, kind, job_dir)
+            transcript = captions_from_metadata(meta)
+        else:
+            meta, transcript = fetch_document_source(url, kind, job_dir)
         save_job(job_id, progress=25, source_title=meta.get("title"), source_uploader=meta.get("uploader") or meta.get("channel"), transcript_preview=transcript[:500])
 
         video_path = None
-        if len(transcript) < 80:
+        if is_video_kind(kind) and (kind != "x" or meta.get("has_video_media")) and len(transcript) < 80:
             save_job(job_id, status="downloading", progress=30)
             video_path = download_reference_video(url, job_dir, kind)
             if video_path:
@@ -766,7 +1018,7 @@ def process_job(job_id: str) -> None:
         save_job(job_id, transcript_preview=transcript[:1000])
 
         if not transcript and not (meta.get("description") or meta.get("title")):
-            raise RuntimeError("動画内容を解析できませんでした。認証済みブラウザ録画などの取得経路が必要です。")
+            raise RuntimeError("入力URLの内容を解析できませんでした。認証済みブラウザ取得などの取得経路が必要です。")
 
         save_job(job_id, status="planning", progress=45)
         analysis = analyze_reference(url, kind, meta, transcript, job_dir)
@@ -815,8 +1067,9 @@ def create_job(req: CreateJobRequest):
     url = req.url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="url is required")
-    if url_kind(url) not in {"x", "youtube"}:
-        raise HTTPException(status_code=400, detail="X URL または YouTube URL を入力してください")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="http/https URL を入力してください")
     job_id = uuid.uuid4().hex[:16]
     save_job(job_id, id=job_id, url=url, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
     thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
