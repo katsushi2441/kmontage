@@ -22,6 +22,21 @@ the generated title or narration remains English, or if the script has too few
 scenes, the backend asks Ollama to rebuild the analysis as a Japanese 12-scene
 short script. If the repaired script still fails the Japanese check, the job is
 stopped instead of publishing an English video.
+
+kmontage must also reject generic fallback scripts. If Ollama analysis times
+out or returns unusable JSON, kmontage retries with a compact source prompt. It
+must not replace the source with generic lines such as "AI活用の要点" or
+"まず何を作るかが大事です". Before sending anything to Kurage, the backend
+checks for generic titles, generic narration phrases, script length, and missing
+source numbers. If the script is too generic or unfaithful, the job becomes
+`error` and writes `script_quality_error.json`; no Kurage video should be
+enqueued.
+
+Ollama generation is queued through RQDB4AI by default. kmontage submits
+`kmontage_jobs.ollama_generate_job` to the host-specific queue such as
+`ollama-192-168-0-14-web`, then waits for the result. This prevents web/API
+requests from directly grabbing a busy local Ollama process and keeps heavy LLM
+work serialized with other Kurage jobs.
 5. The resulting video appears in `kuragev.php` because Kurage owns the final job JSON/video.
 
 `/generate_from_news` is intentionally not used for kmontage reference-video jobs.
@@ -46,8 +61,9 @@ http://localhost:18305/
 
 ```bash
 KURAGE_API=http://127.0.0.1:18303
-OLLAMA_URL=http://192.168.0.3:11434
-OLLAMA_MODEL=gemma4:12b-it-qat
+OLLAMA_URL=http://192.168.0.14:11434
+OLLAMA_MODEL=gemma4:e4b
+KMONTAGE_USE_RQDB4AI_OLLAMA=1
 KURAGEVP_BACKEND_DIR=/home/kojima/work/kuragevp/backend
 KURAGEVP_WHISPER_DEVICE=cuda
 KURAGEVP_WHISPER_COMPUTE_TYPE=float16

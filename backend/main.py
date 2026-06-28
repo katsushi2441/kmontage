@@ -27,10 +27,13 @@ STATIC_DIR = ROOT / "static"
 STORAGE_DIR = ROOT / "storage"
 JOBS_DIR = STORAGE_DIR / "jobs"
 KURAGE_API = os.environ.get("KURAGE_API", "http://127.0.0.1:18303").rstrip("/")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.3:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")
-OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_OLLAMA_TIMEOUT", "180"))
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
+OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_OLLAMA_TIMEOUT", "360"))
 OLLAMA_NUM_PREDICT = int(os.environ.get("KMONTAGE_OLLAMA_NUM_PREDICT", "4096"))
+USE_RQDB4AI_OLLAMA = os.environ.get("KMONTAGE_USE_RQDB4AI_OLLAMA", "1").lower() not in {"0", "false", "no"}
+RQDB4AI_OLLAMA_QUEUE_CLASS = os.environ.get("KMONTAGE_RQDB4AI_OLLAMA_QUEUE_CLASS", "web")
+RQDB4AI_OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_RQDB4AI_OLLAMA_TIMEOUT", "900"))
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "yt-dlp")
 YTDLP_COOKIES_FILE = os.environ.get("KMONTAGE_YTDLP_COOKIES_FILE", "")
 YTDLP_COOKIES_BROWSER = os.environ.get("KMONTAGE_YTDLP_COOKIES_BROWSER", "")
@@ -677,9 +680,12 @@ def ollama_generate(prompt: str, job_dir: Path, label: str, *, temperature: floa
         "options": {"temperature": temperature, "num_predict": num_predict or OLLAMA_NUM_PREDICT},
     }
     try:
-        res = requests.post(ollama_generate_url(), json=payload, timeout=OLLAMA_TIMEOUT)
-        res.raise_for_status()
-        response = res.json().get("response") or ""
+        if USE_RQDB4AI_OLLAMA:
+            response = rqdb4ai_ollama_generate(prompt, job_dir, label, temperature=temperature, num_predict=num_predict)
+        else:
+            res = requests.post(ollama_generate_url(), json=payload, timeout=OLLAMA_TIMEOUT)
+            res.raise_for_status()
+            response = res.json().get("response") or ""
         (job_dir / f"{label}_response.txt").write_text(response, encoding="utf-8")
         return response
     except Exception as exc:
@@ -687,13 +693,46 @@ def ollama_generate(prompt: str, job_dir: Path, label: str, *, temperature: floa
         raise
 
 
+def rqdb4ai_ollama_generate(prompt: str, job_dir: Path, label: str, *, temperature: float = 0.1, num_predict: int | None = None) -> str:
+    helper = ROOT / "scripts" / "rqdb4ai_ollama_generate.py"
+    prompt_file = job_dir / f"{label}_prompt.txt"
+    result_file = job_dir / f"{label}_rqdb4ai_result.json"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    args = [
+        sys.executable if "rq" in sys.modules else "/usr/bin/python3",
+        str(helper),
+        "--prompt-file", str(prompt_file),
+        "--result-file", str(result_file),
+        "--ollama-url", OLLAMA_URL,
+        "--model", OLLAMA_MODEL,
+        "--temperature", str(temperature),
+        "--num-predict", str(num_predict or OLLAMA_NUM_PREDICT),
+        "--queue-class", RQDB4AI_OLLAMA_QUEUE_CLASS,
+        "--timeout", str(RQDB4AI_OLLAMA_TIMEOUT),
+        "--source", "web_online",
+    ]
+    proc = subprocess.run(args, cwd=str(ROOT), text=True, capture_output=True, timeout=RQDB4AI_OLLAMA_TIMEOUT + 60)
+    if proc.stdout.strip():
+        (job_dir / f"{label}_rqdb4ai_stdout.log").write_text(proc.stdout[-8000:], encoding="utf-8")
+    if proc.stderr.strip():
+        (job_dir / f"{label}_rqdb4ai_stderr.log").write_text(proc.stderr[-8000:], encoding="utf-8")
+    if proc.returncode != 0:
+        raise RuntimeError(f"rqdb4ai Ollama job failed rc={proc.returncode}: {(proc.stderr or proc.stdout)[-1200:]}")
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    response = data.get("response") or ""
+    if not response:
+        raise RuntimeError(f"rqdb4ai Ollama job returned empty response: {data}")
+    return response
+
+
 def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
     prompt = build_analysis_prompt(url, kind, meta, transcript)
     try:
         response = ollama_generate(prompt, job_dir, "analysis", temperature=0.1)
         analysis = parse_json_object(response)
-    except Exception:
-        analysis = japanese_extract_fallback(meta, transcript)
+    except Exception as exc:
+        (job_dir / "analysis_primary_error.log").write_text(str(exc), encoding="utf-8")
+        analysis = retry_reference_analysis(url, kind, meta, transcript, job_dir)
     analysis = normalize_reference_analysis(analysis, meta, transcript)
     if needs_japanese_repair(analysis):
         repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir)
@@ -705,8 +744,78 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
             "scene_count": len(((analysis.get("script") or {}).get("scenes") or [])),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         raise RuntimeError("日本語ショート台本の生成に失敗しました。英語台本のままKurageへ送信しないため停止しました。")
+    issues = script_quality_issues(analysis, meta, transcript)
+    if issues:
+        (job_dir / "script_quality_error.json").write_text(json.dumps({
+            "reason": "script_is_too_generic_or_unfaithful",
+            "issues": issues,
+            "title": (analysis.get("script") or {}).get("title"),
+            "scene_count": len(((analysis.get("script") or {}).get("scenes") or [])),
+            "source_title": meta.get("title"),
+            "transcript_chars": len(transcript or ""),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise RuntimeError("元資料に忠実な具体台本を作れませんでした。汎用的なインチキ動画を生成しないため停止しました。詳細は script_quality_error.json を確認してください。")
     write_openmontage_artifacts(job_dir, analysis)
     return analysis
+
+
+def retry_reference_analysis(url: str, kind: str, meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
+    """Retry with a smaller prompt instead of falling back to generic filler."""
+    compact = compact_reference_text(transcript or str(meta.get("description") or ""), 4200)
+    title = meta.get("title") or source_label(kind)
+    prompt = f"""次の元資料から、日本語ショート動画の台本JSONだけを作ってください。
+
+重要: 一般論は禁止。元資料にある数字、商品、手順、ツール、注意点だけを使う。
+元資料に十分な情報がない場合は、JSONで {{"error":"insufficient_source_detail","reason":"理由"}} を返す。
+
+URL: {url}
+タイトル: {title}
+本文/文字起こし:
+{compact}
+
+必須:
+- 日本語タイトル
+- 12シーン
+- 各 narration は元資料の具体情報を含む
+- 金額、期間、ツール名、商品名、手順があれば必ず残す
+- image_prompt だけ英語でよい
+
+JSON形式:
+{{
+  "reference_analysis": {{
+    "title": "日本語タイトル",
+    "core_claim": "中心主張",
+    "evidence_numbers": ["具体的な数字"],
+    "workflow_steps": ["具体的な手順"],
+    "tools_or_methods": ["ツールや方法"],
+    "risks": ["注意点"],
+    "why_it_went_viral": ["伸びた理由"]
+  }},
+  "scene_plan": {{
+    "title": "日本語動画タイトル",
+    "target_duration": 100,
+    "scenes": [{{"index":0,"role":"hook","source_basis":"元資料の根拠","message":"日本語の要点"}}]
+  }},
+  "script": {{
+    "title": "日本語動画タイトル",
+    "scenes": [{{"index":0,"narration":"日本語ナレーション","image_prompt":"English vertical 9:16 explainer visual","duration":8}}]
+  }},
+  "qa": {{
+    "concrete_facts_used": ["台本に入れた具体事実"],
+    "omitted_topics": [],
+    "faithfulness_note": "忠実性の説明"
+  }}
+}}
+"""
+    try:
+        response = ollama_generate(prompt, job_dir, "analysis_retry", temperature=0.05, num_predict=3072)
+        analysis = parse_json_object(response)
+        if analysis.get("error"):
+            raise RuntimeError(f"analysis_retry_failed: {analysis.get('error')} {analysis.get('reason')}")
+        return analysis
+    except Exception as exc:
+        (job_dir / "analysis_retry_error.log").write_text(str(exc), encoding="utf-8")
+        raise RuntimeError(f"LLM解析に失敗しました。汎用フォールバック動画は生成しません。原因: {exc}")
 
 
 def japanese_chars(text: str) -> int:
@@ -740,6 +849,98 @@ def needs_japanese_repair(analysis: dict[str, Any]) -> bool:
         return True
     # A Japanese short should have enough Japanese signal across the script.
     return japanese_chars(joined) < 180
+
+
+GENERIC_TITLE_PATTERNS = [
+    "参照資料から学ぶ",
+    "AI活用の要点",
+    "参照動画の要点",
+    "要点解説",
+]
+
+GENERIC_NARRATION_PATTERNS = [
+    "短い教材や投稿から",
+    "すばやく学べる",
+    "何を作るのか、どのツールを使うのか",
+    "単なる紹介で終わらせず",
+    "小さく試して結果を見ながら",
+    "初心者でも最初の一歩",
+    "内容が薄くなったり",
+    "元資料の根拠、数字、具体例",
+    "フック、手順、注意点",
+    "再現性のある仕組み",
+    "AIを使って学び、作り、改善するサイクル",
+    "自分のプロジェクトで試す",
+]
+
+
+def extract_source_numbers(text: str) -> list[str]:
+    raw = re.findall(r"(?:\$|¥)?\d[\d,.]*(?:\s?(?:ドル|円|万円|万|億|%|RPM|views?|再生|日|ヶ月|カ月|年|時間|分|個|枚|件|sales?|visitors?|months?|years?))?", text or "", flags=re.I)
+    cleaned = []
+    seen = set()
+    for value in raw:
+        v = re.sub(r"\s+", " ", value).strip()
+        if len(v) <= 1:
+            continue
+        key = v.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(v)
+    return cleaned[:20]
+
+
+def extract_source_terms(text: str) -> list[str]:
+    candidates = re.findall(r"\b[A-Z][A-Za-z0-9.+_-]{2,}\b|\b(?:Claude|Kittle|Etsy|Google Drive|ListingView|Flux|Nano Banana|PNG|PDF|ADK|ReAct|YouTube|CapCut|HyperFrames)\b", text or "", flags=re.I)
+    seen = set()
+    terms = []
+    for term in candidates:
+        t = term.strip()
+        key = t.lower()
+        if key in seen or key in {"the", "and", "for", "this", "that", "with"}:
+            continue
+        seen.add(key)
+        terms.append(t)
+    return terms[:24]
+
+
+def script_quality_issues(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> list[str]:
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    title = str(script.get("title") or "")
+    narrations = [str(s.get("narration") or "") for s in scenes if isinstance(s, dict)]
+    joined = "\n".join([title] + narrations)
+    source_text = clean_extracted_text("\n".join([str(meta.get("title") or ""), str(meta.get("description") or ""), transcript or ""]))
+    source_numbers = extract_source_numbers(source_text)
+    source_terms = extract_source_terms(source_text)
+    issues: list[str] = []
+
+    if len(scenes) < 10:
+        issues.append(f"scene_count_too_low:{len(scenes)}")
+    if any(p in title for p in GENERIC_TITLE_PATTERNS) and not any(term.lower() in title.lower() for term in source_terms[:8]):
+        issues.append("generic_title")
+    generic_hits = sum(1 for line in narrations for p in GENERIC_NARRATION_PATTERNS if p in line)
+    if generic_hits >= 3:
+        issues.append(f"generic_narration_phrases:{generic_hits}")
+    if len(source_text) >= 1200 and len(joined) < 500:
+        issues.append(f"script_too_short_for_source:{len(joined)}")
+
+    if len(source_numbers) >= 4:
+        matched = sum(1 for n in source_numbers if normalize_number_token(n) and normalize_number_token(n) in normalize_number_token(joined))
+        if matched < 3:
+            issues.append(f"missing_source_numbers:{matched}/{len(source_numbers)}")
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    evidence = reference.get("evidence_numbers") if isinstance(reference.get("evidence_numbers"), list) else []
+    workflow = reference.get("workflow_steps") if isinstance(reference.get("workflow_steps"), list) else []
+    if len(source_numbers) >= 4 and len(evidence) < 3:
+        issues.append("reference_analysis_missing_evidence")
+    if len(source_text) >= 1200 and len(workflow) < 3:
+        issues.append("reference_analysis_missing_workflow")
+    return issues
+
+
+def normalize_number_token(text: str) -> str:
+    return re.sub(r"[^\d]", "", text or "")
 
 
 def build_japanese_repair_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any]) -> str:
@@ -810,7 +1011,7 @@ def repair_analysis_to_japanese(url: str, kind: str, meta: dict[str, Any], trans
         repaired = parse_json_object(response)
     except Exception as exc:
         (job_dir / "japanese_repair_error.log").write_text(str(exc), encoding="utf-8")
-        repaired = japanese_extract_fallback(meta, transcript)
+        raise RuntimeError(f"日本語修復に失敗しました。汎用フォールバック動画は生成しません。原因: {exc}")
     return repaired
 
 
@@ -852,31 +1053,18 @@ def japanese_fallback_line(point: str, index: int, title: str) -> str:
     point = re.sub(r"https?://\S+", "参照URL", point or "").strip()
     if japanese_chars(point) >= 18:
         return point[:120]
-    generic = [
-        f"今回は「{title[:38]}」を題材に、元資料で語られている要点を日本語で整理します。",
-        "ポイントは、短い教材や投稿から、AI活用の手順をすばやく学べるところです。",
-        "まず注目すべきなのは、何を作るのか、どのツールを使うのか、どこで時間を短縮するのかです。",
-        "次に、単なる紹介で終わらせず、実際の作業手順として分解して見ることが大事です。",
-        "AI時代の学習では、長い理論より、小さく試して結果を見ながら改善する流れが強くなっています。",
-        "この資料の価値は、初心者でも最初の一歩を切りやすい形に整理されている点です。",
-        "一方で、AI任せにしすぎると、内容が薄くなったり、事実確認が弱くなったりします。",
-        "だから、元資料の根拠、数字、具体例を確認しながら、自分の作業に落とし込む必要があります。",
-        "動画化するときは、フック、手順、注意点、次の行動を短く並べると伝わりやすくなります。",
-        "特にビジネス活用では、作業時間の短縮だけでなく、再現性のある仕組みにすることが重要です。",
-        "今回の要点は、AIを使って学び、作り、改善するサイクルを速く回すことです。",
-        "最後に、元資料をそのまま消費するだけでなく、自分のプロジェクトで試すところまで進めましょう。",
-    ]
-    return generic[index % len(generic)]
+    raise RuntimeError("元資料に基づく日本語フォールバック行を作れませんでした。汎用文で動画化しないため停止します。")
 
 
 def japanese_extract_fallback(meta: dict[str, Any], transcript: str) -> dict[str, Any]:
     source_title = str(meta.get("title") or "参照動画").strip()
-    title = source_title if japanese_chars(source_title) >= 4 else "参照資料から学ぶAI活用の要点"
+    title = source_title if japanese_chars(source_title) >= 4 else "参照資料の具体要点"
     numbers = re.findall(r"\$?\d[\d,.]*\s?(?:ドル|円|views?|再生|K|万|%|RPM|users?|month|months?)?", transcript, flags=re.I)[:10]
     rough = source_points_for_fallback(transcript or str(meta.get("description") or ""))
+    if len(rough) < 8:
+        raise RuntimeError("元資料から十分な具体行を抽出できませんでした。汎用フォールバック動画は生成しません。")
     scenes = []
-    for i in range(12):
-        basis = rough[i] if i < len(rough) else (rough[-1] if rough else title)
+    for i, basis in enumerate(rough[:12]):
         narration = japanese_fallback_line(basis, i, title)
         scenes.append({
             "index": i,
@@ -884,6 +1072,8 @@ def japanese_extract_fallback(meta: dict[str, Any], transcript: str) -> dict[str
             "image_prompt": "Japanese vertical explainer, clean data cards, bright studio",
             "duration": 8,
         })
+    if len(scenes) < 10:
+        raise RuntimeError("元資料ベースのシーン数が不足しています。汎用文で水増ししないため停止します。")
     core = scenes[0]["narration"] if scenes else f"{title}の要点を日本語で整理します。"
     return {
         "reference_analysis": {
@@ -999,6 +1189,8 @@ def enqueue_kurage(job_id: str, url: str, kind: str, analysis: dict[str, Any], v
 
 
 def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
+    if job.get("quality_error") or str(job.get("error") or "").startswith("元資料に忠実な具体台本ではなく"):
+        return job
     kurage_job_id = job.get("kurage_job_id")
     if not kurage_job_id:
         return job
