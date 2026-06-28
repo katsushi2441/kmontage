@@ -734,9 +734,11 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
         (job_dir / "analysis_primary_error.log").write_text(str(exc), encoding="utf-8")
         analysis = retry_reference_analysis(url, kind, meta, transcript, job_dir)
     analysis = normalize_reference_analysis(analysis, meta, transcript)
+    analysis = expand_short_but_specific_script(analysis, meta, transcript)
     if needs_japanese_repair(analysis):
         repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir)
         analysis = normalize_reference_analysis(repaired, meta, transcript)
+        analysis = expand_short_but_specific_script(analysis, meta, transcript)
     if needs_japanese_repair(analysis):
         (job_dir / "japanese_quality_error.json").write_text(json.dumps({
             "reason": "script_is_not_japanese_enough",
@@ -937,6 +939,118 @@ def script_quality_issues(analysis: dict[str, Any], meta: dict[str, Any], transc
     if len(source_text) >= 1200 and len(workflow) < 3:
         issues.append("reference_analysis_missing_workflow")
     return issues
+
+
+def split_narration_for_short_scene(text: str) -> list[str]:
+    """Split one faithful source-based scene into two short narration beats."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not text:
+        return []
+    sentences = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
+    if len(sentences) >= 2:
+        mid = max(1, len(sentences) // 2)
+        return ["".join(sentences[:mid]).strip(), "".join(sentences[mid:]).strip()]
+    for sep in ["。", "、", "。"]:
+        if sep in text and len(text) > 44:
+            parts = [p.strip() for p in text.split(sep) if p.strip()]
+            if len(parts) >= 2:
+                mid = max(1, len(parts) // 2)
+                first = sep.join(parts[:mid]).strip()
+                second = sep.join(parts[mid:]).strip()
+                if sep == "。" and first and not first.endswith("。"):
+                    first += "。"
+                if sep == "。" and second and not second.endswith("。"):
+                    second += "。"
+                return [first, second]
+    if len(text) > 70:
+        mid = len(text) // 2
+        return [text[:mid].rstrip("、。 "), text[mid:].lstrip("、。 ")]
+    return [text]
+
+
+def expand_short_but_specific_script(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> dict[str, Any]:
+    """Turn a good but too-short script into 10-12 faithful scenes.
+
+    Local LLMs often understand the source correctly but return six scenes for
+    five-step videos. That should not be treated as an unfaithful script. Split
+    each existing source-based narration into smaller beats instead of falling
+    back to generic filler or publishing fewer scenes.
+    """
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    if not (5 <= len(scenes) < 10):
+        return analysis
+
+    title = str(script.get("title") or meta.get("title") or "参照動画の要点解説")
+    source_text = clean_extracted_text("\n".join([str(meta.get("title") or ""), str(meta.get("description") or ""), transcript or ""]))
+    source_numbers = extract_source_numbers(source_text)
+    joined = "\n".join(str(s.get("narration") or "") for s in scenes if isinstance(s, dict))
+    matched_numbers = sum(1 for n in source_numbers if normalize_number_token(n) and normalize_number_token(n) in normalize_number_token(joined))
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    workflow = reference.get("workflow_steps") if isinstance(reference.get("workflow_steps"), list) else []
+    if len(source_numbers) >= 4 and matched_numbers < 3:
+        return analysis
+    if len(source_text) >= 1200 and len(workflow) < 3:
+        return analysis
+
+    expanded: list[dict[str, Any]] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        narration = str(scene.get("narration") or "").strip()
+        if not narration:
+            continue
+        pieces = split_narration_for_short_scene(narration)
+        if len(pieces) == 1 and len(expanded) + (len(scenes) - len(expanded)) < 10:
+            pieces = [pieces[0]]
+        for piece in pieces:
+            if not piece:
+                continue
+            expanded.append({
+                "index": len(expanded),
+                "narration": piece[:150],
+                "image_prompt": str(scene.get("image_prompt") or "clean Japanese vertical explainer, data cards, 9:16").strip()[:180],
+                "duration": max(6, min(9, int(scene.get("duration") or 8))),
+            })
+            if len(expanded) >= 12:
+                break
+        if len(expanded) >= 12:
+            break
+
+    if len(expanded) < 10:
+        plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
+        plan_scenes = plan.get("scenes") if isinstance(plan.get("scenes"), list) else []
+        for plan_scene in plan_scenes:
+            if not isinstance(plan_scene, dict):
+                continue
+            message = str(plan_scene.get("message") or "").strip()
+            if not message or any(message == s.get("narration") for s in expanded):
+                continue
+            expanded.append({
+                "index": len(expanded),
+                "narration": message[:150],
+                "image_prompt": "clean Japanese vertical explainer, source-based data cards, 9:16",
+                "duration": 8,
+            })
+            if len(expanded) >= 12:
+                break
+
+    if len(expanded) >= 10:
+        analysis["script"] = {"title": title[:70], "scenes": expanded[:12]}
+        plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
+        plan["title"] = plan.get("title") or title
+        plan["target_duration"] = sum(int(s.get("duration") or 8) for s in expanded[:12])
+        plan["scenes"] = [
+            {
+                "index": s["index"],
+                "role": "source_split",
+                "source_basis": "split from source-based LLM scene",
+                "message": s["narration"],
+            }
+            for s in expanded[:12]
+        ]
+        analysis["scene_plan"] = plan
+    return analysis
 
 
 def normalize_number_token(text: str) -> str:
