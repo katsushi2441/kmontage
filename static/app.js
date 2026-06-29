@@ -66,7 +66,8 @@ function renderJob(job) {
   const player = $('player-wrap');
   if (job.status === 'done' && job.kurage_job_id) {
     player.className = 'player';
-    player.innerHTML = `<iframe src="https://kurage.exbridge.jp/kuragev.php?id=${job.kurage_job_id}" allow="autoplay; fullscreen" loading="lazy"></iframe>`;
+    const videoUrl = `https://kurage.exbridge.jp/kuragev.php?proxy=video&job_id=${encodeURIComponent(job.kurage_job_id)}`;
+    player.innerHTML = `<video src="${videoUrl}" controls playsinline preload="metadata"></video>`;
     setActions(true);
   } else if (job.status === 'error') {
     player.className = 'player empty';
