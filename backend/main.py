@@ -1584,6 +1584,8 @@ def list_jobs(limit: int = 20):
     for p in sorted(JOBS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
         try:
             job = json.loads(p.read_text(encoding="utf-8"))
+            if job.get("kurage_job_id") and job.get("status") not in {"done", "error"}:
+                job = refresh_from_kurage(job)
             jobs.append(job)
         except Exception:
             pass
