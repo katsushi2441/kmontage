@@ -841,7 +841,13 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
             "title": (analysis.get("script") or {}).get("title"),
             "scene_count": len(((analysis.get("script") or {}).get("scenes") or [])),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-        repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir)
+        # Feed the gate's findings back to the model: the concrete numbers/terms it
+        # dropped, so the repair re-includes them instead of staying generic.
+        focus_facts = list(dict.fromkeys(
+            quality_source_numbers(analysis, meta, transcript)
+            + extract_source_terms(quality_source_text(meta, transcript))[:8]
+        ))
+        repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir, must_include=focus_facts)
         analysis = normalize_reference_analysis(repaired, meta, transcript)
         analysis = expand_short_but_specific_script(analysis, meta, transcript)
         issues = script_quality_issues(analysis, meta, transcript)
@@ -1183,13 +1189,22 @@ def normalize_number_token(text: str) -> str:
     return re.sub(r"[^\d]", "", text or "")
 
 
-def build_japanese_repair_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any]) -> str:
+def build_japanese_repair_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any], must_include: list[str] | None = None) -> str:
     label = source_label(kind)
     title = meta.get("title") or label
     uploader = meta.get("uploader") or meta.get("channel") or ""
     description = meta.get("description") or ""
     transcript_excerpt = compact_reference_text(transcript, 5000)
     previous = json.dumps(analysis, ensure_ascii=False)[:8000]
+    must_block = ""
+    if must_include:
+        joined = " / ".join(str(x).strip() for x in must_include[:14] if str(x).strip())
+        if joined:
+            must_block = (
+                "\n最重要: 前回は元資料を一般論に薄めてしまいました。次の具体情報を必ず"
+                "タイトルか各ナレーションに織り込み、汎用的な言い換えで省略しないこと:\n"
+                f"{joined}\n"
+            )
     return f"""次の{label}から、日本語ショート解説動画の台本を作り直してください。
 
 前回の解析結果に英語タイトル・英語ナレーション・シーン不足が混ざりました。今回は必ず日本語で、12シーンの完成台本にしてください。
@@ -1206,7 +1221,7 @@ URL: {url}
 
 前回解析結果（参考。英語のまま使わず、日本語へ要約し直す）:
 {previous}
-
+{must_block}
 必須条件:
 - title、reference_analysis、scene_plan.message、script.scenes[].narration はすべて自然な日本語
 - 英語字幕をそのまま貼り付けない。固有名詞とツール名以外は日本語にする
@@ -1244,8 +1259,8 @@ URL: {url}
 """
 
 
-def repair_analysis_to_japanese(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any], job_dir: Path) -> dict[str, Any]:
-    prompt = build_japanese_repair_prompt(url, kind, meta, transcript, analysis)
+def repair_analysis_to_japanese(url: str, kind: str, meta: dict[str, Any], transcript: str, analysis: dict[str, Any], job_dir: Path, must_include: list[str] | None = None) -> dict[str, Any]:
+    prompt = build_japanese_repair_prompt(url, kind, meta, transcript, analysis, must_include)
     try:
         response = ollama_generate(prompt, job_dir, "japanese_repair", temperature=0.05)
         repaired = parse_json_object(response)
