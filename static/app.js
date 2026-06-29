@@ -149,31 +149,34 @@ $('delete').addEventListener('click', async () => {
 async function loadHistory() {
   const res = await fetch('/api/jobs');
   const data = await res.json();
-  const select = $('history-select');
-  const selected = select.value;
-  select.innerHTML = '<option value="">最近の生成から選択</option>';
+  const box = $('history');
+  box.innerHTML = '';
   for (const job of data.jobs || []) {
-    const option = document.createElement('option');
-    option.value = job.id;
-    option.textContent = `${statusLabel(job)} / ${jobTitle(job)} / ${job.url || ''}`;
-    option.dataset.job = JSON.stringify(job);
-    select.appendChild(option);
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    const title = escapeHtml(jobTitle(job));
+    const url = escapeHtml(job.url || '');
+    const status = escapeHtml(`${statusLabel(job)} / ${job.progress ?? 0}%`);
+    const kurage = job.kurage_job_id ? `<small>Kurage: ${escapeHtml(job.kurage_status || '-') } / ${escapeHtml(job.kurage_progress ?? '-') }%</small>` : '';
+    div.innerHTML = `
+      <button class="history-main" data-id="${escapeHtml(job.id)}" type="button">
+        <strong>${title}</strong>
+        <small>${status} / ${url}</small>
+        ${kurage}
+      </button>`;
+    div.querySelector('button').addEventListener('click', async () => {
+      currentJobId = job.id;
+      await poll(job.id);
+      clearInterval(pollTimer);
+      if (!['done', 'error'].includes(job.status)) {
+        pollTimer = setInterval(() => poll(job.id), 5000);
+      }
+    });
+    box.appendChild(div);
   }
-  if (selected) select.value = selected;
+  if (!box.innerHTML) box.innerHTML = '<div class="message">まだ生成履歴がありません。</div>';
 }
 $('reload').addEventListener('click', loadHistory);
-$('history-select').addEventListener('change', async () => {
-  const option = $('history-select').selectedOptions[0];
-  if (!option || !option.value) return;
-  const job = JSON.parse(option.dataset.job || '{}');
-  currentJobId = job.id;
-  await poll(job.id);
-  clearInterval(pollTimer);
-  if (!['done', 'error'].includes(job.status)) {
-    pollTimer = setInterval(() => poll(job.id), 5000);
-  }
-});
-
 $('source-url').addEventListener('input', () => {
   if ($('source-url').value.trim() !== currentJobUrl) {
     currentJobId = null;

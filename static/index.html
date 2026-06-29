@@ -20,12 +20,6 @@
         <input id="source-url" type="url" placeholder="https://x.com/... または https://example.com/article.pdf" />
         <button id="generate">要約ショート生成</button>
       </div>
-      <div class="input-row history-picker">
-        <select id="history-select">
-          <option value="">最近の生成から選択</option>
-        </select>
-        <button id="reload" type="button">履歴更新</button>
-      </div>
       <p id="message" class="message">待機中</p>
     </section>
 
@@ -55,6 +49,11 @@
           <span>生成完了後に再生窓が表示されます</span>
         </div>
       </article>
+    </section>
+
+    <section class="panel history">
+      <div class="section-title"><span>最近の生成</span><button id="reload">更新</button></div>
+      <div id="history"></div>
     </section>
   </main>
   <script src="/static/app.js"></script>
