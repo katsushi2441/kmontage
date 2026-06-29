@@ -82,6 +82,17 @@ def save_job(job_id: str, **kwargs: Any) -> dict[str, Any]:
     return data
 
 
+def replace_job(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    p = job_path(job_id)
+    data = dict(data)
+    data["updated_at"] = now()
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(p)
+    return data
+
+
 def run_cmd(args: list[str], *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
 
@@ -1567,6 +1578,37 @@ def create_job(req: CreateJobRequest):
     thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
     thread.start()
     return {"ok": True, "job_id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/regenerate")
+def regenerate_job(job_id: str, req: CreateJobRequest):
+    current = load_job(job_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="job not found")
+    url = req.url.strip() or str(current.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="http/https URL を入力してください")
+    old_kurage_job_id = current.get("kurage_job_id")
+    job_dir = JOBS_DIR / job_id
+    if job_dir.exists():
+        shutil.rmtree(job_dir)
+    replace_job(job_id, {
+        "id": job_id,
+        "url": url,
+        "status": "queued",
+        "progress": 0,
+        "vtuber_mode": req.vtuber_mode,
+        "video_style": req.video_style,
+        "created_at": current.get("created_at") or now(),
+        "regenerated_at": now(),
+        "previous_kurage_job_id": old_kurage_job_id,
+    })
+    thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
+    thread.start()
+    return {"ok": True, "job_id": job_id, "regenerated": True}
 
 
 @app.get("/api/jobs/{job_id}")

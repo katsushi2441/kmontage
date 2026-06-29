@@ -1,4 +1,5 @@
 let currentJobId = null;
+let currentJobUrl = '';
 let pollTimer = null;
 
 const $ = (id) => document.getElementById(id);
@@ -46,60 +47,13 @@ function statusLabel(job) {
   return labels[job.status] || job.status || '不明';
 }
 
-function stageClass(done, active, error) {
-  if (error) return 'stage error';
-  if (done) return 'stage done';
-  if (active) return 'stage active';
-  return 'stage';
-}
-
-function renderProgress(job) {
-  const status = job.status || 'unknown';
-  const progress = Number(job.progress || 0);
-  const stages = [
-    ['解析', progress >= 25 || ['downloading', 'transcribing', 'planning', 'generating', 'done'].includes(status)],
-    ['取得', progress >= 38 || ['transcribing', 'planning', 'generating', 'done'].includes(status)],
-    ['台本', progress >= 55 || ['generating', 'done'].includes(status)],
-    ['Kurage生成', progress >= 80 || status === 'done'],
-    ['完了', status === 'done']
-  ];
-  const activeIndex = status === 'error'
-    ? -1
-    : status === 'queued' ? 0
-    : status === 'analyzing' ? 0
-    : status === 'downloading' ? 1
-    : status === 'transcribing' ? 1
-    : status === 'planning' ? 2
-    : status === 'generating' ? 3
-    : status === 'done' ? 4
-    : 0;
-  const rows = [
-    ['kmontage状態', `${statusLabel(job)} / ${progress}%`],
-    ['ジョブID', job.id || '-'],
-    ['元URL', job.url ? `<a href="${escapeHtml(job.url)}" target="_blank" rel="noopener">${escapeHtml(job.url)}</a>` : '-'],
-    ['元タイトル', escapeHtml(job.source_title || '-')],
-  ];
-  if (job.kurage_job_id) rows.push(['Kurageジョブ', `<a href="https://kurage.exbridge.jp/kuragev.php?id=${escapeHtml(job.kurage_job_id)}" target="_blank" rel="noopener">${escapeHtml(job.kurage_job_id)}</a>`]);
-  if (job.kurage_status) rows.push(['Kurage状態', `${escapeHtml(job.kurage_status)} / ${escapeHtml(job.kurage_progress ?? '-') }%`]);
-  if (job.reference_duration) rows.push(['元動画尺', `${Math.round(Number(job.reference_duration))}秒`]);
-  if (job.updated_at) rows.push(['最終更新', escapeHtml(job.updated_at)]);
-
-  $('progress-panel').innerHTML = `
-    <div class="stage-row">
-      ${stages.map(([label, done], i) => `<span class="${stageClass(done, i === activeIndex, status === 'error' && i === activeIndex)}">${label}</span>`).join('')}
-    </div>
-    <dl class="job-meta">
-      ${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${v}</dd></div>`).join('')}
-    </dl>
-  `;
-}
-
 function renderJob(job) {
   currentJobId = job.id;
+  currentJobUrl = job.url || '';
+  if (job.url) $('source-url').value = job.url;
   $('status').textContent = `${job.status || 'unknown'} ${job.progress ?? 0}%`;
   $('title').textContent = jobTitle(job);
   $('summary').textContent = job.summary || job.reference_analysis?.core_claim || job.analysis?.reference_analysis?.core_claim || job.analysis?.summary || job.transcript_preview || '解析中です。';
-  renderProgress(job);
   const list = $('script');
   list.innerHTML = '';
   for (const line of scriptLines(job)) {
@@ -143,11 +97,14 @@ $('generate').addEventListener('click', async () => {
   $('generate').disabled = true;
   message('生成ジョブを開始しています...');
   try {
-    const res = await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url, vtuber_mode:true, video_style:'ai_avatar_explainer'})});
+    const sameLoadedUrl = currentJobId && currentJobUrl && url === currentJobUrl;
+    const endpoint = sameLoadedUrl ? `/api/jobs/${encodeURIComponent(currentJobId)}/regenerate` : '/api/jobs';
+    const res = await fetch(endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({url, vtuber_mode:true, video_style:'ai_avatar_explainer'})});
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || '生成開始に失敗しました');
     currentJobId = data.job_id;
-    message(`ジョブ開始: ${currentJobId}`);
+    currentJobUrl = url;
+    message(`${sameLoadedUrl ? '上書き再生成' : 'ジョブ開始'}: ${currentJobId}`);
     clearInterval(pollTimer);
     await poll(currentJobId);
     pollTimer = setInterval(() => poll(currentJobId), 5000);
@@ -177,6 +134,7 @@ $('delete').addEventListener('click', async () => {
   if (!currentJobId || !confirm('この生成ジョブとKurage動画を削除しますか？')) return;
   await fetch(`/api/jobs/${currentJobId}`, {method:'DELETE'});
   currentJobId = null;
+  currentJobUrl = '';
   clearInterval(pollTimer);
   $('status').textContent = '削除済み';
   $('title').textContent = 'タイトルはここに表示されます';
@@ -205,8 +163,7 @@ async function loadHistory() {
         <strong>${title}</strong>
         <small>${status} / ${url}</small>
         ${kurage}
-      </button>
-      <button class="history-open" data-id="${escapeHtml(job.id)}" type="button">経過を見る</button>`;
+      </button>`;
     div.querySelectorAll('button').forEach((button) => button.addEventListener('click', async () => {
       currentJobId = job.id;
       await poll(job.id);
@@ -219,6 +176,12 @@ async function loadHistory() {
   }
 }
 $('reload').addEventListener('click', loadHistory);
+
+$('source-url').addEventListener('input', () => {
+  if ($('source-url').value.trim() !== currentJobUrl) {
+    currentJobId = null;
+  }
+});
 
 async function openInitialJob() {
   await loadHistory();
