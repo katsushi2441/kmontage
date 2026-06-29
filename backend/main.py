@@ -926,12 +926,13 @@ def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcr
         "errors": opinions.get("errors") or [],
     }, ensure_ascii=False, indent=2)[:7000]
     return f"""あなたはKurage Montage Newsの編集者です。
-ニュースURLの本文と、Kurage AgentReachが収集したX・YouTube・ブログ/Webの反応をもとに、Kurageアバターが紹介する2分程度の日本語ショート動画台本JSONを作ってください。
+ニュースURLの本文と、Kurage AgentReachが収集したYahooコメント・X・YouTube・ブログ/Webの反応をもとに、Kurageアバターが紹介する2分程度の日本語ショート動画台本JSONを作ってください。
 
 重要:
 - ニュース本文と収集された反応だけを根拠にする。知らない事実を足さない。
 - URLをアルファベットで読み上げない。
-- 「みんなが言っています」のような断定は禁止。必ず「Xでは」「YouTubeでは」「ブログでは」「一部では」のように出所を分ける。
+- 「みんなが言っています」のような断定は禁止。必ず「Yahooコメントでは」「Xでは」「YouTubeでは」「ブログでは」「一部では」のように出所を分ける。
+- Yahooコメントを使う場合は、共感数が多いコメントを「共感数の多い意見」として扱い、コメント本文を丸読みせず要点に整理する。
 - ニュース紹介だけで終わらず、賛成・懸念・実務目線・今後の見方など、複数の意見を整理する。
 - 台本は自然な日本語。英語原文をそのまま貼らない。
 - 60〜120秒、12シーン、各8〜10秒程度。
@@ -955,7 +956,7 @@ Kurage AgentReach 収集結果:
     "title": "日本語タイトル",
     "core_claim": "このニュースと反応を一文で要約",
     "news_summary": ["ニュース本文に基づく具体要点"],
-    "opinion_summary": ["X/YouTube/ブログなどの反応要点"],
+    "opinion_summary": ["Yahooコメント/X/YouTube/ブログなどの反応要点"],
     "evidence_numbers": ["数字や固有名詞"],
     "workflow_steps": ["視聴者が理解する流れ"],
     "tools_or_methods": ["関連ツールや方法があれば"],
@@ -973,7 +974,7 @@ Kurage AgentReach 収集結果:
   }},
   "qa": {{
     "concrete_facts_used": ["台本に入れた具体事実"],
-    "reaction_sources_used": ["X/YouTube/Webのどれを使ったか"],
+    "reaction_sources_used": ["Yahooコメント/X/YouTube/Webのどれを使ったか"],
     "omitted_topics": [],
     "faithfulness_note": "ニュース本文と反応に忠実である説明"
   }}
@@ -992,7 +993,7 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
         issues.append(f"scene_count_too_low:{len(scenes)}")
     if japanese_chars(joined) < 240 or any(text_looks_english(n) for n in narrations):
         issues.append("script_is_not_japanese_enough")
-    if not any(word in joined for word in ["意見", "反応", "Xでは", "YouTube", "ブログ", "Web", "一部では", "懸念"]):
+    if not any(word in joined for word in ["意見", "反応", "Yahoo", "コメント", "Xでは", "YouTube", "ブログ", "Web", "一部では", "懸念"]):
         issues.append("missing_reaction_framing")
     if len(points) >= 3:
         used = 0
@@ -1716,6 +1717,7 @@ def process_job(job_id: str) -> None:
                 opinion_research=opinions,
                 opinion_count=len(opinions.get("opinion_points") or []),
                 opinion_sources={
+                    "yahoo_comments": len(((opinions.get("sources") or {}).get("yahoo_comments") or [])),
                     "web": len(((opinions.get("sources") or {}).get("web") or [])),
                     "youtube": len(((opinions.get("sources") or {}).get("youtube") or [])),
                     "x": len(((opinions.get("sources") or {}).get("x") or [])),
