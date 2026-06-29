@@ -5,7 +5,6 @@ Kurage Montage (`kmontage`) turns a reference X, YouTube, blog/article, or PDF U
 ## Structure
 
 - `backend/`: FastAPI app for reference video analysis and Kurage job orchestration.
-- `static/`: single-page UI.
 - `storage/jobs/`: local job metadata. Downloaded media is ignored.
 - `OpenMontage/`: upstream reference OSS clone, intentionally ignored by Git.
 
@@ -51,11 +50,14 @@ cd /home/kojima/work/kmontage
 /home/kojima/work/kuragevp/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 18305
 ```
 
-Open:
+API health check:
 
 ```text
-http://localhost:18305/
+http://localhost:18305/api/health
 ```
+
+The public user interface is owned by the Kurage web repository and served as
+`https://kurage.exbridge.jp/kmontage.php`.
 
 ## Environment
 

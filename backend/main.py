@@ -18,12 +18,9 @@ import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC_DIR = ROOT / "static"
 STORAGE_DIR = ROOT / "storage"
 JOBS_DIR = STORAGE_DIR / "jobs"
 KURAGE_API = os.environ.get("KURAGE_API", "http://127.0.0.1:18303").rstrip("/")
@@ -44,7 +41,6 @@ KURAGEVP_BACKEND_DIR = Path(os.environ.get("KURAGEVP_BACKEND_DIR", "/home/kojima
 
 app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 class CreateJobRequest(BaseModel):
@@ -1555,9 +1551,15 @@ def process_job(job_id: str) -> None:
         save_job(job_id, status="error", error=str(exc), progress=100)
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+@app.get("/")
+def index():
+    return {
+        "ok": True,
+        "service": "kmontage",
+        "message": "Kurage Montage API. Public UI is served by kurage/kmontage.php.",
+        "health": "/api/health",
+        "jobs": "/api/jobs",
+    }
 
 
 @app.get("/api/health")
