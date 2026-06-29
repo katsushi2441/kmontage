@@ -17,7 +17,7 @@ def _generate_url(base_url: str) -> str:
 def ollama_generate_job(
     prompt: str,
     ollama_url: str = "http://192.168.0.14:11434",
-    model: str = "gemma4:e4b",
+    model: str = "gemma4:12b-it-qat",
     temperature: float = 0.1,
     num_predict: int = 4096,
     request_timeout: int = 900,

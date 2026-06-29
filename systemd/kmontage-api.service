@@ -7,7 +7,7 @@ Type=simple
 WorkingDirectory=/home/kojima/work/kmontage
 Environment=KURAGE_API=http://127.0.0.1:18303
 Environment=OLLAMA_URL=http://192.168.0.14:11434
-Environment=OLLAMA_MODEL=gemma4:e4b
+Environment=OLLAMA_MODEL=gemma4:12b-it-qat
 Environment=KMONTAGE_USE_RQDB4AI_OLLAMA=1
 Environment=KURAGEVP_BACKEND_DIR=/home/kojima/work/kuragevp/backend
 Environment=KURAGEVP_WHISPER_DEVICE=cuda

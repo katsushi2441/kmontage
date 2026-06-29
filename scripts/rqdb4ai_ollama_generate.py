@@ -36,7 +36,7 @@ def main() -> int:
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--result-file", required=True)
     parser.add_argument("--ollama-url", default="http://192.168.0.14:11434")
-    parser.add_argument("--model", default="gemma4:e4b")
+    parser.add_argument("--model", default="gemma4:12b-it-qat")
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--num-predict", type=int, default=4096)
     parser.add_argument("--queue-class", default="web")

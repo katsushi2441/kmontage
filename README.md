@@ -64,7 +64,7 @@ The public user interface is owned by the Kurage web repository and served as
 ```bash
 KURAGE_API=http://127.0.0.1:18303
 OLLAMA_URL=http://192.168.0.14:11434
-OLLAMA_MODEL=gemma4:e4b
+OLLAMA_MODEL=gemma4:12b-it-qat
 KMONTAGE_USE_RQDB4AI_OLLAMA=1
 KURAGEVP_BACKEND_DIR=/home/kojima/work/kuragevp/backend
 KURAGEVP_WHISPER_DEVICE=cuda
