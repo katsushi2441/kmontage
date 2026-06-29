@@ -158,14 +158,18 @@ $('generate').addEventListener('click', async () => {
   }
 });
 
+function shareText() {
+  return `${$('title').textContent}\n${$('summary').textContent}\n${$('kurage-link').href}`;
+}
+
 $('copy').addEventListener('click', async () => {
-  const text = `${$('title').textContent}\n${$('summary').textContent}\n${$('kurage-link').href}`;
+  const text = shareText();
   await navigator.clipboard.writeText(text);
   message('コピーしました');
 });
 
 $('post-x').addEventListener('click', () => {
-  const text = `${$('title').textContent}\n${$('kurage-link').href}`;
+  const text = shareText();
   window.open(`https://x.com/intent/tweet?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
 });
 
