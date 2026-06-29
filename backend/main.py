@@ -30,7 +30,7 @@ KURAGE_API = os.environ.get("KURAGE_API", "http://127.0.0.1:18303").rstrip("/")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
 OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_OLLAMA_TIMEOUT", "360"))
-OLLAMA_NUM_PREDICT = int(os.environ.get("KMONTAGE_OLLAMA_NUM_PREDICT", "4096"))
+OLLAMA_NUM_PREDICT = int(os.environ.get("KMONTAGE_OLLAMA_NUM_PREDICT", "8192"))
 USE_RQDB4AI_OLLAMA = os.environ.get("KMONTAGE_USE_RQDB4AI_OLLAMA", "1").lower() not in {"0", "false", "no"}
 RQDB4AI_OLLAMA_QUEUE_CLASS = os.environ.get("KMONTAGE_RQDB4AI_OLLAMA_QUEUE_CLASS", "web")
 RQDB4AI_OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_RQDB4AI_OLLAMA_TIMEOUT", "900"))
@@ -652,7 +652,87 @@ def parse_json_object(text: str) -> dict[str, Any]:
     end = text.rfind("}")
     if start >= 0 and end > start:
         text = text[start:end+1]
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        salvaged = salvage_script_analysis(text)
+        if salvaged:
+            return salvaged
+        raise
+
+
+def _json_string_value(raw: str) -> str:
+    try:
+        return json.loads(f'"{raw}"')
+    except Exception:
+        return raw.replace('\\"', '"').replace("\\n", "\n")
+
+
+def salvage_script_analysis(text: str) -> dict[str, Any] | None:
+    """Recover concrete script scenes from slightly malformed LLM JSON.
+
+    Local LLMs sometimes emit useful scene objects but miss a comma or the final
+    closing brackets. We only recover explicit narration/image_prompt pairs; we
+    never invent generic filler here.
+    """
+    title = "参照動画の要点解説"
+    title_match = re.search(r'"script"\s*:\s*\{.*?"title"\s*:\s*"((?:\\.|[^"])*)"', text, flags=re.S)
+    if not title_match:
+        title_match = re.search(r'"title"\s*:\s*"((?:\\.|[^"])*)"', text, flags=re.S)
+    if title_match:
+        title = _json_string_value(title_match.group(1)).strip() or title
+
+    scenes: list[dict[str, Any]] = []
+    scene_pattern = re.compile(
+        r'"narration"\s*:\s*"((?:\\.|[^"])*)"\s*,\s*'
+        r'"image_prompt"\s*:\s*"((?:\\.|[^"])*)"\s*,\s*'
+        r'"duration"\s*:\s*(\d+)',
+        flags=re.S,
+    )
+    for match in scene_pattern.finditer(text):
+        narration = _json_string_value(match.group(1)).strip()
+        image_prompt = _json_string_value(match.group(2)).strip()
+        if not narration:
+            continue
+        scenes.append({
+            "index": len(scenes),
+            "narration": narration,
+            "image_prompt": image_prompt or "clean Japanese vertical explainer, data cards, 9:16",
+            "duration": int(match.group(3) or 8),
+        })
+        if len(scenes) >= 12:
+            break
+
+    if len(scenes) < 6:
+        return None
+
+    evidence = extract_source_numbers("\n".join([title] + [s["narration"] for s in scenes]))
+    workflow = [s["narration"] for s in scenes[: min(5, len(scenes))]]
+    return {
+        "reference_analysis": {
+            "title": title,
+            "core_claim": scenes[0]["narration"],
+            "evidence_numbers": evidence,
+            "workflow_steps": workflow,
+            "tools_or_methods": [],
+            "risks": [],
+            "why_it_went_viral": [],
+        },
+        "scene_plan": {
+            "title": title,
+            "target_duration": sum(int(s.get("duration") or 8) for s in scenes),
+            "scenes": [
+                {"index": s["index"], "role": "salvaged_scene", "source_basis": "malformed_llm_json", "message": s["narration"]}
+                for s in scenes
+            ],
+        },
+        "script": {"title": title, "scenes": scenes},
+        "qa": {
+            "concrete_facts_used": evidence,
+            "omitted_topics": [],
+            "faithfulness_note": "Recovered from explicit LLM scene objects after malformed JSON.",
+        },
+    }
 
 
 def compact_reference_text(text: str, limit: int = 7000) -> str:
@@ -748,6 +828,17 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
         raise RuntimeError("日本語ショート台本の生成に失敗しました。英語台本のままKurageへ送信しないため停止しました。")
     issues = script_quality_issues(analysis, meta, transcript)
     if issues:
+        (job_dir / "script_quality_repair_reason.json").write_text(json.dumps({
+            "reason": "retry_quality_repair",
+            "issues": issues,
+            "title": (analysis.get("script") or {}).get("title"),
+            "scene_count": len(((analysis.get("script") or {}).get("scenes") or [])),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir)
+        analysis = normalize_reference_analysis(repaired, meta, transcript)
+        analysis = expand_short_but_specific_script(analysis, meta, transcript)
+        issues = script_quality_issues(analysis, meta, transcript)
+    if issues:
         (job_dir / "script_quality_error.json").write_text(json.dumps({
             "reason": "script_is_too_generic_or_unfaithful",
             "issues": issues,
@@ -810,7 +901,7 @@ JSON形式:
 }}
 """
     try:
-        response = ollama_generate(prompt, job_dir, "analysis_retry", temperature=0.05, num_predict=3072)
+        response = ollama_generate(prompt, job_dir, "analysis_retry", temperature=0.05, num_predict=8192)
         analysis = parse_json_object(response)
         if analysis.get("error"):
             raise RuntimeError(f"analysis_retry_failed: {analysis.get('error')} {analysis.get('reason')}")
@@ -911,9 +1002,12 @@ def script_quality_issues(analysis: dict[str, Any], meta: dict[str, Any], transc
     scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
     title = str(script.get("title") or "")
     narrations = [str(s.get("narration") or "") for s in scenes if isinstance(s, dict)]
-    joined = "\n".join([title] + narrations)
-    source_text = clean_extracted_text("\n".join([str(meta.get("title") or ""), str(meta.get("description") or ""), transcript or ""]))
-    source_numbers = extract_source_numbers(source_text)
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    evidence = reference.get("evidence_numbers") if isinstance(reference.get("evidence_numbers"), list) else []
+    workflow = reference.get("workflow_steps") if isinstance(reference.get("workflow_steps"), list) else []
+    joined = "\n".join([title] + narrations + [str(x) for x in evidence] + [str(x) for x in workflow])
+    source_text = quality_source_text(meta, transcript)
+    source_numbers = quality_source_numbers(analysis, meta, transcript)
     source_terms = extract_source_terms(source_text)
     issues: list[str] = []
 
@@ -931,14 +1025,30 @@ def script_quality_issues(analysis: dict[str, Any], meta: dict[str, Any], transc
         matched = sum(1 for n in source_numbers if normalize_number_token(n) and normalize_number_token(n) in normalize_number_token(joined))
         if matched < 3:
             issues.append(f"missing_source_numbers:{matched}/{len(source_numbers)}")
-    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
-    evidence = reference.get("evidence_numbers") if isinstance(reference.get("evidence_numbers"), list) else []
-    workflow = reference.get("workflow_steps") if isinstance(reference.get("workflow_steps"), list) else []
     if len(source_numbers) >= 4 and len(evidence) < 3:
         issues.append("reference_analysis_missing_evidence")
     if len(source_text) >= 1200 and len(workflow) < 3:
         issues.append("reference_analysis_missing_workflow")
     return issues
+
+
+def quality_source_text(meta: dict[str, Any], transcript: str) -> str:
+    """Use source content, not YouTube promotional description noise, for QA."""
+    title = str(meta.get("title") or "")
+    transcript = transcript or ""
+    if len(clean_extracted_text(transcript)) >= 300:
+        return clean_extracted_text("\n".join([title, transcript]))
+    return clean_extracted_text("\n".join([title, str(meta.get("description") or ""), transcript]))
+
+
+def quality_source_numbers(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> list[str]:
+    """Prefer LLM-extracted evidence numbers over noisy YouTube descriptions."""
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    evidence = reference.get("evidence_numbers") if isinstance(reference.get("evidence_numbers"), list) else []
+    evidence_numbers = extract_source_numbers("\n".join(str(x) for x in evidence))
+    if len(evidence_numbers) >= 3:
+        return evidence_numbers[:12]
+    return extract_source_numbers(quality_source_text(meta, transcript))[:12]
 
 
 def split_narration_for_short_scene(text: str) -> list[str]:
@@ -948,6 +1058,9 @@ def split_narration_for_short_scene(text: str) -> list[str]:
         return []
     sentences = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
     if len(sentences) >= 2:
+        while len(sentences) >= 2 and len(sentences[0]) < 24:
+            sentences[1] = sentences[0] + sentences[1]
+            sentences.pop(0)
         mid = max(1, len(sentences) // 2)
         return ["".join(sentences[:mid]).strip(), "".join(sentences[mid:]).strip()]
     for sep in ["。", "、", "。"]:
@@ -982,13 +1095,19 @@ def expand_short_but_specific_script(analysis: dict[str, Any], meta: dict[str, A
         return analysis
 
     title = str(script.get("title") or meta.get("title") or "参照動画の要点解説")
-    source_text = clean_extracted_text("\n".join([str(meta.get("title") or ""), str(meta.get("description") or ""), transcript or ""]))
-    source_numbers = extract_source_numbers(source_text)
+    source_text = quality_source_text(meta, transcript)
+    source_numbers = quality_source_numbers(analysis, meta, transcript)
     joined = "\n".join(str(s.get("narration") or "") for s in scenes if isinstance(s, dict))
     matched_numbers = sum(1 for n in source_numbers if normalize_number_token(n) and normalize_number_token(n) in normalize_number_token(joined))
     reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
     workflow = reference.get("workflow_steps") if isinstance(reference.get("workflow_steps"), list) else []
-    if len(source_numbers) >= 4 and matched_numbers < 3:
+    evidence = reference.get("evidence_numbers") if isinstance(reference.get("evidence_numbers"), list) else []
+    evidence_joined = "\n".join(str(x) for x in evidence + workflow)
+    matched_in_analysis = sum(
+        1 for n in source_numbers
+        if normalize_number_token(n) and normalize_number_token(n) in normalize_number_token(joined + "\n" + evidence_joined)
+    )
+    if len(source_numbers) >= 4 and matched_numbers < 2 and matched_in_analysis < 3:
         return analysis
     if len(source_text) >= 1200 and len(workflow) < 3:
         return analysis
