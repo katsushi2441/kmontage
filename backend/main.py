@@ -933,6 +933,11 @@ def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcr
 - URLをアルファベットで読み上げない。
 - 「みんなが言っています」のような断定は禁止。必ず「Yahooコメントでは」「Xでは」「YouTubeでは」「ブログでは」「一部では」のように出所を分ける。
 - Yahooコメントを使う場合は、共感数が多いコメントを「共感数の多い意見」として扱い、コメント本文を丸読みせず要点に整理する。
+- ニュース紹介は短めにする。冒頭1〜2シーン、全体の20%以下まで。
+- 動画の主役は「みんなの意見」。12シーン中8シーン以上を、共感数上位コメントやWeb/YouTube/Xの反応整理に使う。
+- 1シーン目はサムネを意識する。ニュースの争点と、共感数上位の代表意見が画面の大きな文字カードで伝わる構成にする。
+- 1シーン目の narration は短く、ニュースの争点 + 代表意見を45〜80字程度で言い切る。
+- image_prompt は明るいWhite Studioで、黒背景禁止。冒頭は thumbnail-like vertical card, large readable Japanese headline cards, news issue + top public opinion を必ず含める。
 - ニュース紹介だけで終わらず、賛成・懸念・実務目線・今後の見方など、複数の意見を整理する。
 - 台本は自然な日本語。英語原文をそのまま貼らない。
 - 60〜120秒、12シーン、各8〜10秒程度。
@@ -995,15 +1000,116 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
         issues.append("script_is_not_japanese_enough")
     if not any(word in joined for word in ["意見", "反応", "Yahoo", "コメント", "Xでは", "YouTube", "ブログ", "Web", "一部では", "懸念"]):
         issues.append("missing_reaction_framing")
+    yahoo_points = [
+        p for p in points
+        if isinstance(p, dict) and str(p.get("platform") or "") == "Yahooコメント"
+    ]
+    source_text = "\n".join(str(p.get("point") or "") for p in points)
+    source_terms = extract_source_terms(source_text)[:16]
+    reaction_scene_count = 0
+    for n in narrations:
+        explicit_reaction = any(
+            word in n
+            for word in [
+                "意見", "反応", "共感", "Yahoo", "コメント", "一部では", "懸念", "賛成", "批判",
+                "指摘", "視点", "反論", "疑問", "不満", "期待", "問われています",
+            ]
+        )
+        source_based = any(term and term.lower() in n.lower() for term in source_terms)
+        if explicit_reaction or source_based:
+            reaction_scene_count += 1
+    if len(yahoo_points) >= 3 and reaction_scene_count < 6:
+        issues.append(f"too_few_opinion_scenes:{reaction_scene_count}")
+    first_prompt = str(scenes[0].get("image_prompt") or "").lower() if scenes else ""
+    if scenes and not any(word in first_prompt for word in ["thumbnail", "headline", "card", "text"]):
+        issues.append("opening_visual_not_thumbnail_like")
     if len(points) >= 3:
         used = 0
-        source_text = "\n".join(str(p.get("point") or "") for p in points)
         for term in extract_source_terms(source_text)[:10]:
             if term.lower() in joined.lower():
                 used += 1
-        if used < 1 and len(clean_extracted_text(source_text)) >= 300:
+        yahoo_reactions_reflected = bool(yahoo_points) and any(word in joined for word in ["Yahoo", "コメント", "共感"])
+        if used < 1 and not yahoo_reactions_reflected and len(clean_extracted_text(source_text)) >= 300:
             issues.append("reactions_not_reflected")
     return issues
+
+
+def shorten_news_narration(text: str, limit: int = 86) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    candidates = re.split(r"(?<=[。！？])", text)
+    out = ""
+    for part in candidates:
+        if not part:
+            continue
+        if len(out + part) <= limit:
+            out += part
+        elif out:
+            break
+    if len(out) >= 28:
+        return out.strip()
+    cut = text[:limit].rstrip("、。 ")
+    if "、" in cut:
+        cut = cut.rsplit("、", 1)[0]
+    return (cut or text[:limit]).strip() + "。"
+
+
+def compact_news_opinion_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Keep news-opinion videos around two minutes and avoid Kurage re-splitting scenes."""
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    if not scenes:
+        return analysis
+
+    def is_opinion(scene: dict[str, Any]) -> bool:
+        text = " ".join(str(scene.get(k) or "") for k in ["narration", "role", "source_basis"])
+        return any(word in text for word in ["意見", "反応", "共感", "Yahoo", "コメント", "懸念", "批判", "不満", "賛否"])
+
+    first = scenes[:1]
+    opinion_scenes = [s for s in scenes[1:] if isinstance(s, dict) and is_opinion(s)]
+    other_scenes = [s for s in scenes[1:] if isinstance(s, dict) and not is_opinion(s)]
+    selected = first + opinion_scenes[:10]
+    for scene in other_scenes:
+        if len(selected) >= 12:
+            break
+        selected.append(scene)
+    if len(selected) < 10:
+        selected = [s for s in scenes if isinstance(s, dict)][:12]
+    else:
+        selected = selected[:12]
+
+    cleaned: list[dict[str, Any]] = []
+    for scene in selected:
+        narration = shorten_news_narration(str(scene.get("narration") or ""), 82 if len(cleaned) else 78)
+        if not narration:
+            continue
+        prompt = str(scene.get("image_prompt") or "bright white studio vertical news opinion explainer, Kurage avatar, clean cards, 9:16").strip()
+        if not cleaned and "thumbnail" not in prompt.lower():
+            prompt = "thumbnail-like vertical card, large readable Japanese headline cards, news issue + top public opinion, bright white studio, Kurage avatar explainer"
+        cleaned.append({
+            "index": len(cleaned),
+            "narration": narration,
+            "image_prompt": prompt[:220],
+            "duration": 9 if len(cleaned) == 0 else 8,
+        })
+
+    script["scenes"] = cleaned[:12]
+    script["title"] = str(script.get("title") or analysis.get("reference_analysis", {}).get("title") or "ニュース反応まとめ")[:70]
+    analysis["script"] = script
+    plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
+    plan["target_duration"] = sum(int(s.get("duration") or 8) for s in script["scenes"])
+    plan["scenes"] = [
+        {
+            "index": s["index"],
+            "role": "news_opinion",
+            "source_basis": "news/opinion",
+            "message": s["narration"],
+        }
+        for s in script["scenes"]
+    ]
+    analysis["scene_plan"] = plan
+    return analysis
 
 
 def analyze_news_opinions(url: str, kind: str, meta: dict[str, Any], transcript: str, opinions: dict[str, Any], job_dir: Path) -> dict[str, Any]:
@@ -1017,6 +1123,7 @@ def analyze_news_opinions(url: str, kind: str, meta: dict[str, Any], transcript:
     if analysis.get("error"):
         raise RuntimeError(f"ニュース反応台本を生成できません: {analysis.get('error')} {analysis.get('reason')}")
     analysis = normalize_reference_analysis(analysis, meta, transcript)
+    analysis = compact_news_opinion_analysis(analysis)
     issues = news_opinion_quality_issues(analysis, opinions)
     if issues:
         (job_dir / "news_opinion_quality_error.json").write_text(json.dumps({
