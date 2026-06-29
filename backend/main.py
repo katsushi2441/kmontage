@@ -38,6 +38,10 @@ FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 ENABLE_TRANSCRIBE = os.environ.get("KMONTAGE_ENABLE_TRANSCRIBE", "1").lower() not in {"0", "false", "no"}
 KURAGEVP_BACKEND_DIR = Path(os.environ.get("KURAGEVP_BACKEND_DIR", "/home/kojima/work/kuragevp/backend"))
+KAGENTREACH_ROOT = Path(os.environ.get("KAGENTREACH_ROOT", "/home/kojima/work/kagentreach"))
+KAGENTREACH_NEWS_OPINION_SCRIPT = Path(
+    os.environ.get("KAGENTREACH_NEWS_OPINION_SCRIPT", str(KAGENTREACH_ROOT / "scripts" / "news-opinion-research.py"))
+)
 
 app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -47,6 +51,7 @@ class CreateJobRequest(BaseModel):
     url: str
     vtuber_mode: bool = True
     video_style: str = "ai_avatar_explainer"
+    mode: str = "summary"
 
 
 def now() -> str:
@@ -865,6 +870,164 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
     return analysis
 
 
+def build_news_opinion_query(meta: dict[str, Any], transcript: str) -> str:
+    title = str(meta.get("title") or "").strip()
+    if title:
+        return title[:140]
+    text = clean_extracted_text(transcript or str(meta.get("description") or ""))
+    first = re.split(r"[。.!?\n]", text)[0].strip()
+    return first[:140]
+
+
+def collect_news_opinions(url: str, meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
+    if not KAGENTREACH_NEWS_OPINION_SCRIPT.exists():
+        raise RuntimeError(f"Kurage AgentReach opinion collector not found: {KAGENTREACH_NEWS_OPINION_SCRIPT}")
+    out_file = job_dir / "news_opinions.json"
+    query = build_news_opinion_query(meta, transcript)
+    args = [
+        sys.executable,
+        str(KAGENTREACH_NEWS_OPINION_SCRIPT),
+        "--url", url,
+        "--title", str(meta.get("title") or ""),
+        "--query", query,
+        "--out", str(out_file),
+        "--limit", "8",
+    ]
+    proc = subprocess.run(args, cwd=str(KAGENTREACH_ROOT), text=True, capture_output=True, timeout=1200)
+    if proc.stdout.strip():
+        (job_dir / "kagentreach_news_stdout.log").write_text(proc.stdout[-12000:], encoding="utf-8")
+    if proc.stderr.strip():
+        (job_dir / "kagentreach_news_stderr.log").write_text(proc.stderr[-12000:], encoding="utf-8")
+    data: dict[str, Any] = {}
+    if out_file.exists():
+        data = json.loads(out_file.read_text(encoding="utf-8"))
+    elif proc.stdout.strip():
+        data = json.loads(proc.stdout)
+    if proc.returncode != 0 and not data.get("opinion_points"):
+        detail = (proc.stderr or proc.stdout or "unknown error")[-1200:]
+        raise RuntimeError(f"Kurage AgentReachでニュース反応を収集できませんでした: {detail}")
+    points = data.get("opinion_points") if isinstance(data.get("opinion_points"), list) else []
+    if len(points) < 3:
+        raise RuntimeError("ニュースに関する意見候補が不足しています。汎用的な反応紹介動画を生成しないため停止しました。")
+    return data
+
+
+def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, opinions: dict[str, Any]) -> str:
+    title = str(meta.get("title") or source_label(kind)).strip()
+    article_text = compact_reference_text("\n".join([
+        str(meta.get("title") or ""),
+        str(meta.get("description") or ""),
+        transcript or "",
+    ]), 5200)
+    opinion_json = json.dumps({
+        "query": opinions.get("query"),
+        "summary": opinions.get("summary"),
+        "opinion_points": opinions.get("opinion_points") or [],
+        "errors": opinions.get("errors") or [],
+    }, ensure_ascii=False, indent=2)[:7000]
+    return f"""あなたはKurage Montage Newsの編集者です。
+ニュースURLの本文と、Kurage AgentReachが収集したX・YouTube・ブログ/Webの反応をもとに、Kurageアバターが紹介する2分程度の日本語ショート動画台本JSONを作ってください。
+
+重要:
+- ニュース本文と収集された反応だけを根拠にする。知らない事実を足さない。
+- URLをアルファベットで読み上げない。
+- 「みんなが言っています」のような断定は禁止。必ず「Xでは」「YouTubeでは」「ブログでは」「一部では」のように出所を分ける。
+- ニュース紹介だけで終わらず、賛成・懸念・実務目線・今後の見方など、複数の意見を整理する。
+- 台本は自然な日本語。英語原文をそのまま貼らない。
+- 60〜120秒、12シーン、各8〜10秒程度。
+- image_promptだけ英語でよい。明るいWhite Studio、Kurage avatar explainerの映像指示にする。
+- 十分な根拠がない場合は {{"error":"insufficient_reaction_detail","reason":"理由"}} を返す。汎用台本で埋めない。
+- JSONのみで返す。
+
+ニュースURL: {url}
+種類: {kind}
+ニュースタイトル: {title}
+
+ニュース本文/取得内容:
+{article_text}
+
+Kurage AgentReach 収集結果:
+{opinion_json}
+
+返すJSON形式:
+{{
+  "reference_analysis": {{
+    "title": "日本語タイトル",
+    "core_claim": "このニュースと反応を一文で要約",
+    "news_summary": ["ニュース本文に基づく具体要点"],
+    "opinion_summary": ["X/YouTube/ブログなどの反応要点"],
+    "evidence_numbers": ["数字や固有名詞"],
+    "workflow_steps": ["視聴者が理解する流れ"],
+    "tools_or_methods": ["関連ツールや方法があれば"],
+    "risks": ["懸念や注意点"],
+    "why_it_matters": ["なぜ重要か"]
+  }},
+  "scene_plan": {{
+    "title": "日本語動画タイトル",
+    "target_duration": 110,
+    "scenes": [{{"index":0,"role":"hook","source_basis":"ニュース本文または収集反応の根拠","message":"日本語の要点"}}]
+  }},
+  "script": {{
+    "title": "日本語動画タイトル",
+    "scenes": [{{"index":0,"narration":"日本語ナレーション","image_prompt":"bright white studio vertical news explainer with cute Kurage avatar, clean cards, 9:16","duration":9}}]
+  }},
+  "qa": {{
+    "concrete_facts_used": ["台本に入れた具体事実"],
+    "reaction_sources_used": ["X/YouTube/Webのどれを使ったか"],
+    "omitted_topics": [],
+    "faithfulness_note": "ニュース本文と反応に忠実である説明"
+  }}
+}}
+"""
+
+
+def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, Any]) -> list[str]:
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    narrations = [str(s.get("narration") or "") for s in scenes if isinstance(s, dict)]
+    joined = "\n".join([str(script.get("title") or "")] + narrations)
+    points = opinions.get("opinion_points") if isinstance(opinions.get("opinion_points"), list) else []
+    issues: list[str] = []
+    if len(scenes) < 10:
+        issues.append(f"scene_count_too_low:{len(scenes)}")
+    if japanese_chars(joined) < 240 or any(text_looks_english(n) for n in narrations):
+        issues.append("script_is_not_japanese_enough")
+    if not any(word in joined for word in ["意見", "反応", "Xでは", "YouTube", "ブログ", "Web", "一部では", "懸念"]):
+        issues.append("missing_reaction_framing")
+    if len(points) >= 3:
+        used = 0
+        source_text = "\n".join(str(p.get("point") or "") for p in points)
+        for term in extract_source_terms(source_text)[:10]:
+            if term.lower() in joined.lower():
+                used += 1
+        if used < 1 and len(clean_extracted_text(source_text)) >= 300:
+            issues.append("reactions_not_reflected")
+    return issues
+
+
+def analyze_news_opinions(url: str, kind: str, meta: dict[str, Any], transcript: str, opinions: dict[str, Any], job_dir: Path) -> dict[str, Any]:
+    prompt = build_news_opinion_prompt(url, kind, meta, transcript, opinions)
+    try:
+        response = ollama_generate(prompt, job_dir, "news_opinion_analysis", temperature=0.08)
+        analysis = parse_json_object(response)
+    except Exception as exc:
+        (job_dir / "news_opinion_analysis_error.log").write_text(str(exc), encoding="utf-8")
+        raise RuntimeError(f"ニュース反応台本の生成に失敗しました。原因: {exc}")
+    if analysis.get("error"):
+        raise RuntimeError(f"ニュース反応台本を生成できません: {analysis.get('error')} {analysis.get('reason')}")
+    analysis = normalize_reference_analysis(analysis, meta, transcript)
+    issues = news_opinion_quality_issues(analysis, opinions)
+    if issues:
+        (job_dir / "news_opinion_quality_error.json").write_text(json.dumps({
+            "reason": "news_opinion_script_quality_failed",
+            "issues": issues,
+            "opinion_count": len(opinions.get("opinion_points") or []),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise RuntimeError("ニュース反応を反映した具体的な日本語台本を作れませんでした。インチキ動画を生成しないため停止しました。")
+    write_openmontage_artifacts(job_dir, analysis)
+    return analysis
+
+
 def retry_reference_analysis(url: str, kind: str, meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
     """Retry with a smaller prompt instead of falling back to generic filler."""
     compact = compact_reference_text(transcript or str(meta.get("description") or ""), 4200)
@@ -1418,7 +1581,17 @@ def write_openmontage_artifacts(job_dir: Path, analysis: dict[str, Any]) -> None
     )
 
 
-def enqueue_kurage(job_id: str, url: str, kind: str, analysis: dict[str, Any], vtuber_mode: bool, video_style: str) -> str:
+def enqueue_kurage(
+    job_id: str,
+    url: str,
+    kind: str,
+    analysis: dict[str, Any],
+    vtuber_mode: bool,
+    video_style: str,
+    *,
+    source: str = "kmontage",
+    source_name: str = "Kurage Montage",
+) -> str:
     script = analysis.get("script") or {}
     reference = analysis.get("reference_analysis") or {}
     title = str(script.get("title") or reference.get("title") or "参照動画の要点解説").strip()
@@ -1427,9 +1600,9 @@ def enqueue_kurage(job_id: str, url: str, kind: str, analysis: dict[str, Any], v
         "script": script,
         "source_url": url,
         "source_title": title,
-        "source_name": "Kurage Montage",
+        "source_name": source_name,
         "source_platform": kind,
-        "source": "kmontage",
+        "source": source,
         "vtuber_mode": vtuber_mode,
         "video_style": video_style,
     }
@@ -1494,6 +1667,7 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
 def process_job(job_id: str) -> None:
     job = load_job(job_id) or {}
     url = job.get("url") or ""
+    mode = str(job.get("mode") or "summary")
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -1534,8 +1708,25 @@ def process_job(job_id: str) -> None:
         if not transcript and not (meta.get("description") or meta.get("title")):
             raise RuntimeError("入力URLの内容を解析できませんでした。認証済みブラウザ取得などの取得経路が必要です。")
 
-        save_job(job_id, status="planning", progress=45)
-        analysis = analyze_reference(url, kind, meta, transcript, job_dir)
+        if mode == "news_opinions":
+            save_job(job_id, status="researching", progress=40)
+            opinions = collect_news_opinions(url, meta, transcript, job_dir)
+            save_job(
+                job_id,
+                opinion_research=opinions,
+                opinion_count=len(opinions.get("opinion_points") or []),
+                opinion_sources={
+                    "web": len(((opinions.get("sources") or {}).get("web") or [])),
+                    "youtube": len(((opinions.get("sources") or {}).get("youtube") or [])),
+                    "x": len(((opinions.get("sources") or {}).get("x") or [])),
+                },
+                opinion_errors=opinions.get("errors") or [],
+            )
+            save_job(job_id, status="planning", progress=48)
+            analysis = analyze_news_opinions(url, kind, meta, transcript, opinions, job_dir)
+        else:
+            save_job(job_id, status="planning", progress=45)
+            analysis = analyze_reference(url, kind, meta, transcript, job_dir)
         reference = analysis.get("reference_analysis") or {}
         scene_plan = analysis.get("scene_plan") or {}
         script = analysis.get("script") or {}
@@ -1552,7 +1743,24 @@ def process_job(job_id: str) -> None:
         )
 
         save_job(job_id, status="generating", progress=55)
-        kurage_job_id = enqueue_kurage(job_id, url, kind, analysis, bool(job.get("vtuber_mode", True)), str(job.get("video_style") or "ai_avatar_explainer"))
+        if mode == "news_opinions":
+            source = "kmontage_news"
+            source_name = "Kurage Montage News"
+            default_style = "ai_avatar_news_explainer"
+        else:
+            source = "kmontage"
+            source_name = "Kurage Montage"
+            default_style = "ai_avatar_explainer"
+        kurage_job_id = enqueue_kurage(
+            job_id,
+            url,
+            kind,
+            analysis,
+            bool(job.get("vtuber_mode", True)),
+            str(job.get("video_style") or default_style),
+            source=source,
+            source_name=source_name,
+        )
         save_job(job_id, kurage_job_id=kurage_job_id, status="generating", progress=60)
 
         deadline = time.time() + 3600
@@ -1579,7 +1787,16 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "service": "kmontage", "time": now(), "kurage_api": KURAGE_API, "ollama_url": OLLAMA_URL, "ollama_model": OLLAMA_MODEL}
+    return {
+        "ok": True,
+        "service": "kmontage",
+        "time": now(),
+        "kurage_api": KURAGE_API,
+        "ollama_url": OLLAMA_URL,
+        "ollama_model": OLLAMA_MODEL,
+        "modes": ["summary", "news_opinions"],
+        "kagentreach_news_opinion_script": str(KAGENTREACH_NEWS_OPINION_SCRIPT),
+    }
 
 
 @app.post("/api/jobs")
@@ -1591,7 +1808,10 @@ def create_job(req: CreateJobRequest):
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="http/https URL を入力してください")
     job_id = uuid.uuid4().hex[:16]
-    save_job(job_id, id=job_id, url=url, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
+    mode = req.mode.strip() or "summary"
+    if mode not in {"summary", "news_opinions"}:
+        raise HTTPException(status_code=400, detail="unsupported mode")
+    save_job(job_id, id=job_id, url=url, mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
     thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
     thread.start()
     return {"ok": True, "job_id": job_id}
@@ -1608,6 +1828,9 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="http/https URL を入力してください")
+    mode = req.mode.strip() or str(current.get("mode") or "summary")
+    if mode not in {"summary", "news_opinions"}:
+        raise HTTPException(status_code=400, detail="unsupported mode")
     old_kurage_job_id = current.get("kurage_job_id")
     job_dir = JOBS_DIR / job_id
     if job_dir.exists():
@@ -1615,6 +1838,7 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
     replace_job(job_id, {
         "id": job_id,
         "url": url,
+        "mode": mode,
         "status": "queued",
         "progress": 0,
         "vtuber_mode": req.vtuber_mode,
@@ -1637,12 +1861,14 @@ def get_job(job_id: str):
 
 
 @app.get("/api/jobs")
-def list_jobs(limit: int = 20):
+def list_jobs(limit: int = 20, mode: str = ""):
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     jobs = []
     for p in sorted(JOBS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
         try:
             job = json.loads(p.read_text(encoding="utf-8"))
+            if mode and str(job.get("mode") or "summary") != mode:
+                continue
             if job.get("kurage_job_id") and job.get("status") not in {"done", "error"}:
                 job = refresh_from_kurage(job)
             jobs.append(job)

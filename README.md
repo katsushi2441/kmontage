@@ -59,6 +59,14 @@ http://localhost:18305/api/health
 The public user interface is owned by the Kurage web repository and served as
 `https://kurage.exbridge.jp/kmontage.php`.
 
+`kmontagenews.php` is the news-opinion variant. It submits jobs with
+`mode=news_opinions`, fetches the source URL like regular kmontage, then calls
+Kurage AgentReach (`kagentreach/scripts/news-opinion-research.py`) to collect
+public reactions from Web/Blog, YouTube, and X/browser-use when available.
+Gemma 12B still generates the final script through the RQDB4AI Ollama queue.
+If the collected reactions are too thin, or if the script does not actually
+introduce reactions, the job fails before it can enqueue a fake Kurage video.
+
 ## Environment
 
 ```bash
