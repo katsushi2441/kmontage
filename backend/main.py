@@ -935,9 +935,10 @@ def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcr
 - Yahooコメントを使う場合は、共感数が多いコメントを「共感数の多い意見」として扱い、コメント本文を丸読みせず要点に整理する。
 - ニュース紹介は短めにする。冒頭1〜2シーン、全体の20%以下まで。
 - 動画の主役は「みんなの意見」。12シーン中8シーン以上を、共感数上位コメントやWeb/YouTube/Xの反応整理に使う。
-- 1シーン目はサムネを意識する。ニュースの争点と、共感数上位の代表意見が画面の大きな文字カードで伝わる構成にする。
+- 1シーン目はサムネを意識する。ニュースの争点と、共感数上位の代表意見は narration と後段のHyperFramesテロップで伝える。画像生成AIに日本語文字を描かせない。
 - 1シーン目の narration は短く、ニュースの争点 + 代表意見を45〜80字程度で言い切る。
-- image_prompt は明るいWhite Studioで、黒背景禁止。冒頭は thumbnail-like vertical card, large readable Japanese headline cards, news issue + top public opinion を必ず含める。
+- image_prompt は明るいWhite Studioで、黒背景禁止。冒頭は thumbnail-like vertical composition, blank headline panels without text, news issue + top public opinion visual metaphor を必ず含める。
+- image_prompt には no text, no letters, no numbers, blank cards only を入れる。カードやUIは空欄にし、読ませたい文字はHyperFramesで重ねる前提にする。
 - ニュース紹介だけで終わらず、賛成・懸念・実務目線・今後の見方など、複数の意見を整理する。
 - 台本は自然な日本語。英語原文をそのまま貼らない。
 - 60〜120秒、12シーン、各8〜10秒程度。
@@ -1086,7 +1087,7 @@ def compact_news_opinion_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
             continue
         prompt = str(scene.get("image_prompt") or "bright white studio vertical news opinion explainer, Kurage avatar, clean cards, 9:16").strip()
         if not cleaned and "thumbnail" not in prompt.lower():
-            prompt = "thumbnail-like vertical card, large readable Japanese headline cards, news issue + top public opinion, bright white studio, Kurage avatar explainer"
+            prompt = "thumbnail-like vertical composition, blank headline panels without text, news issue + top public opinion visual metaphor, bright white studio, Kurage avatar explainer, no text, no letters, no numbers"
         cleaned.append({
             "index": len(cleaned),
             "narration": narration,
