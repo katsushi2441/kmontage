@@ -909,11 +909,29 @@ def collect_news_opinions(url: str, meta: dict[str, Any], transcript: str, job_d
     points = data.get("opinion_points") if isinstance(data.get("opinion_points"), list) else []
     if len(points) < 3:
         raise RuntimeError("ニュースに関する意見候補が不足しています。汎用的な反応紹介動画を生成しないため停止しました。")
+    if url_kind(url) == "x":
+        x_replies = ((data.get("sources") or {}).get("x_replies") or [])
+        x_reply_points = [
+            p for p in points
+            if isinstance(p, dict) and str(p.get("platform") or "") == "Xリプライ"
+        ]
+        if len(x_replies) < 3 or len(x_reply_points) < 3:
+            errors = data.get("errors") if isinstance(data.get("errors"), list) else []
+            detail = " / ".join(str(e) for e in errors if "x_replies" in str(e))[:800]
+            raise RuntimeError(
+                "X投稿のリプライ取得が不足しています。X投稿では、いいねが多いリプライを主役にするため、"
+                f"認証済みtwitter-cliで3件以上のリプライ取得が必要です。{detail}"
+            )
     return data
 
 
 def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcript: str, opinions: dict[str, Any]) -> str:
     title = str(meta.get("title") or source_label(kind)).strip()
+    author_info = ""
+    if kind == "x":
+        author_name = str(meta.get("channel") or "").strip()
+        author_handle = str(meta.get("uploader") or "").strip()
+        author_info = f"\nX投稿者: {author_name} {author_handle}".strip()
     article_text = compact_reference_text("\n".join([
         str(meta.get("title") or ""),
         str(meta.get("description") or ""),
@@ -925,6 +943,18 @@ def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcr
         "opinion_points": opinions.get("opinion_points") or [],
         "errors": opinions.get("errors") or [],
     }, ensure_ascii=False, indent=2)[:7000]
+    is_x = kind == "x"
+    x_extra_rules = ""
+    if is_x:
+        x_extra_rules = """
+X投稿URLの場合の最重要ルール:
+- 主役は元投稿への「Xリプライ」。YahooコメントやWeb検索より、いいね数が多いXリプライを最優先に扱う。
+- 冒頭1〜2シーンで元投稿の内容を短く紹介し、残りは「いいね上位リプライの論点整理」に使う。
+- 「Xリプライでは」「いいね上位のリプライでは」「別のリプライでは」のように、必ずリプライ由来だと分かる言い方にする。
+- リプライ本文を丸読みせず、要点に整理する。ただし、賛成・反対・懸念・実務目線などの違いは潰さない。
+- いいね数がある場合は「いいねが多いリプライでは」のように重みを伝える。
+- 投稿者名や人物名を勝手に漢字化しない。本文やリプライにない実名は推測せず、「投稿者」「本田さん」「{meta.get("channel") or "投稿者"}」のように根拠のある呼び方だけ使う。
+"""
     return f"""あなたはKurage Montage Newsの編集者です。
 ニュースURLの本文と、Kurage AgentReachが収集したYahooコメント・X・YouTube・ブログ/Webの反応をもとに、Kurageアバターが紹介する2分程度の日本語ショート動画台本JSONを作ってください。
 
@@ -933,6 +963,7 @@ def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcr
 - URLをアルファベットで読み上げない。
 - 「みんなが言っています」のような断定は禁止。必ず「Yahooコメントでは」「Xでは」「YouTubeでは」「ブログでは」「一部では」のように出所を分ける。
 - Yahooコメントを使う場合は、共感数が多いコメントを「共感数の多い意見」として扱い、コメント本文を丸読みせず要点に整理する。
+- Xリプライを使う場合は、いいね数が多いリプライを「いいね上位の反応」として扱い、リプライ本文を丸読みせず要点に整理する。
 - ニュース紹介は短めにする。冒頭1〜2シーン、全体の20%以下まで。
 - 動画の主役は「みんなの意見」。12シーン中8シーン以上を、共感数上位コメントやWeb/YouTube/Xの反応整理に使う。
 - 1シーン目はサムネを意識する。ニュースの争点と、共感数上位の代表意見は narration と後段のHyperFramesテロップで伝える。画像生成AIに日本語文字を描かせない。
@@ -945,10 +976,12 @@ def build_news_opinion_prompt(url: str, kind: str, meta: dict[str, Any], transcr
 - image_promptだけ英語でよい。明るいWhite Studio、Kurage avatar explainerの映像指示にする。
 - 十分な根拠がない場合は {{"error":"insufficient_reaction_detail","reason":"理由"}} を返す。汎用台本で埋めない。
 - JSONのみで返す。
+{x_extra_rules}
 
 ニュースURL: {url}
 種類: {kind}
 ニュースタイトル: {title}
+{author_info}
 
 ニュース本文/取得内容:
 {article_text}
@@ -1005,6 +1038,10 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
         p for p in points
         if isinstance(p, dict) and str(p.get("platform") or "") == "Yahooコメント"
     ]
+    x_reply_points = [
+        p for p in points
+        if isinstance(p, dict) and str(p.get("platform") or "") == "Xリプライ"
+    ]
     source_text = "\n".join(str(p.get("point") or "") for p in points)
     source_terms = extract_source_terms(source_text)[:16]
     reaction_scene_count = 0
@@ -1021,6 +1058,20 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
             reaction_scene_count += 1
     if len(yahoo_points) >= 3 and reaction_scene_count < 6:
         issues.append(f"too_few_opinion_scenes:{reaction_scene_count}")
+    if len(x_reply_points) >= 3:
+        x_reply_markers = [
+            "Xリプライ", "リプライ", "いいね", "反応", "賛成", "反対", "懸念", "指摘",
+            "期待", "ワクワク", "本気", "覚悟", "参謀", "提案", "ファン", "ユーモア",
+            "興味", "議論", "支持",
+        ]
+        x_reply_scene_count = sum(
+            1 for n in narrations
+            if any(word in n for word in x_reply_markers)
+        )
+        if x_reply_scene_count < 6:
+            issues.append(f"too_few_x_reply_scenes:{x_reply_scene_count}")
+        if not any(word in joined for word in ["Xリプライ", "リプライ", "いいね"]):
+            issues.append("missing_x_reply_framing")
     first_prompt = str(scenes[0].get("image_prompt") or "").lower() if scenes else ""
     if scenes and not any(word in first_prompt for word in ["thumbnail", "headline", "card", "text"]):
         issues.append("opening_visual_not_thumbnail_like")
@@ -1030,7 +1081,8 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
             if term.lower() in joined.lower():
                 used += 1
         yahoo_reactions_reflected = bool(yahoo_points) and any(word in joined for word in ["Yahoo", "コメント", "共感"])
-        if used < 1 and not yahoo_reactions_reflected and len(clean_extracted_text(source_text)) >= 300:
+        x_reactions_reflected = bool(x_reply_points) and any(word in joined for word in ["Xリプライ", "リプライ", "いいね", "反応"])
+        if used < 1 and not yahoo_reactions_reflected and not x_reactions_reflected and len(clean_extracted_text(source_text)) >= 300:
             issues.append("reactions_not_reflected")
     return issues
 
@@ -1065,7 +1117,7 @@ def compact_news_opinion_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
 
     def is_opinion(scene: dict[str, Any]) -> bool:
         text = " ".join(str(scene.get(k) or "") for k in ["narration", "role", "source_basis"])
-        return any(word in text for word in ["意見", "反応", "共感", "Yahoo", "コメント", "懸念", "批判", "不満", "賛否"])
+        return any(word in text for word in ["意見", "反応", "共感", "Yahoo", "コメント", "Xリプライ", "リプライ", "いいね", "懸念", "批判", "不満", "賛否"])
 
     first = scenes[:1]
     opinion_scenes = [s for s in scenes[1:] if isinstance(s, dict) and is_opinion(s)]
@@ -1826,6 +1878,7 @@ def process_job(job_id: str) -> None:
                 opinion_count=len(opinions.get("opinion_points") or []),
                 opinion_sources={
                     "yahoo_comments": len(((opinions.get("sources") or {}).get("yahoo_comments") or [])),
+                    "x_replies": len(((opinions.get("sources") or {}).get("x_replies") or [])),
                     "web": len(((opinions.get("sources") or {}).get("web") or [])),
                     "youtube": len(((opinions.get("sources") or {}).get("youtube") or [])),
                     "x": len(((opinions.get("sources") or {}).get("x") or [])),
