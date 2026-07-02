@@ -893,6 +893,11 @@ def collect_news_opinions(url: str, meta: dict[str, Any], transcript: str, job_d
         "--out", str(out_file),
         "--limit", "8",
     ]
+    parsed = urlparse(url)
+    if parsed.netloc.lower().endswith("news.yahoo.co.jp") and "/comments" in parsed.path:
+        # Yahoo comments are already the primary source for kmontagenews.
+        # Avoid blocking the hourly worker on optional browser-use X search.
+        args.append("--skip-x")
     proc = subprocess.run(args, cwd=str(KAGENTREACH_ROOT), text=True, capture_output=True, timeout=1200)
     if proc.stdout.strip():
         (job_dir / "kagentreach_news_stdout.log").write_text(proc.stdout[-12000:], encoding="utf-8")
@@ -1024,6 +1029,8 @@ Kurage AgentReach 収集結果:
 def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, Any]) -> list[str]:
     script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
     scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    scene_plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
+    plan_scenes = scene_plan.get("scenes") if isinstance(scene_plan.get("scenes"), list) else []
     narrations = [str(s.get("narration") or "") for s in scenes if isinstance(s, dict)]
     joined = "\n".join([str(script.get("title") or "")] + narrations)
     points = opinions.get("opinion_points") if isinstance(opinions.get("opinion_points"), list) else []
@@ -1045,15 +1052,26 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
     source_text = "\n".join(str(p.get("point") or "") for p in points)
     source_terms = extract_source_terms(source_text)[:16]
     reaction_scene_count = 0
-    for n in narrations:
+    for idx, n in enumerate(narrations):
+        script_scene = scenes[idx] if idx < len(scenes) and isinstance(scenes[idx], dict) else {}
+        plan_scene = plan_scenes[idx] if idx < len(plan_scenes) and isinstance(plan_scenes[idx], dict) else {}
+        scene_context = "\n".join([
+            n,
+            str(script_scene.get("role") or ""),
+            str(script_scene.get("source_basis") or ""),
+            str(plan_scene.get("role") or ""),
+            str(plan_scene.get("source_basis") or ""),
+            str(plan_scene.get("message") or ""),
+        ])
         explicit_reaction = any(
-            word in n
+            word in scene_context
             for word in [
                 "意見", "反応", "共感", "Yahoo", "コメント", "一部では", "懸念", "賛成", "批判",
                 "指摘", "視点", "反論", "疑問", "不満", "期待", "問われています",
+                "opinion", "reaction", "x_reply", "news_opinion",
             ]
         )
-        source_based = any(term and term.lower() in n.lower() for term in source_terms)
+        source_based = any(term and term.lower() in scene_context.lower() for term in source_terms)
         if explicit_reaction or source_based:
             reaction_scene_count += 1
     if len(yahoo_points) >= 3 and reaction_scene_count < 6:
