@@ -1323,12 +1323,24 @@ GENERIC_NARRATION_PATTERNS = [
 
 
 def extract_source_numbers(text: str) -> list[str]:
-    raw = re.findall(r"(?:\$|¥)?\d[\d,.]*(?:\s?(?:ドル|円|万円|万|億|%|RPM|views?|再生|日|ヶ月|カ月|年|時間|分|個|枚|件|sales?|visitors?|months?|years?))?", text or "", flags=re.I)
+    unit_pattern = (
+        r"ドル|円|万円|万|億|%|％|割|つ|個|枚|件|社|人|回|"
+        r"ステップ|項目|条件|モード|ツール|ブロック|パート|章|"
+        r"RPM|views?|再生|日|週|週間|ヶ月|カ月|年|時間|分|"
+        r"steps?|parts?|blocks?|items?|conditions?|tools?|modes?|"
+        r"sales?|visitors?|months?|years?"
+    )
+    raw = re.findall(rf"(?:\$|¥)?\d[\d,.]*(?:\s?(?:{unit_pattern}))?", text or "", flags=re.I)
     cleaned = []
     seen = set()
     for value in raw:
-        v = re.sub(r"\s+", " ", value).strip()
+        v = re.sub(r"\s+", " ", value).strip().rstrip(".,")
         if len(v) <= 1:
+            continue
+        # Bare one/two digit list markers such as 01., 02., 10. are section
+        # numbers, not concrete evidence that must appear in a short script.
+        has_unit_or_currency = bool(re.search(rf"(?:\$|¥|{unit_pattern})", v, flags=re.I))
+        if not has_unit_or_currency and re.fullmatch(r"\d{1,2}", v):
             continue
         key = v.lower()
         if key in seen:
