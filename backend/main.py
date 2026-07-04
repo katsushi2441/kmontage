@@ -88,6 +88,18 @@ def is_active_job(job: dict[str, Any]) -> bool:
     return str(job.get("status") or "").lower() in ACTIVE_JOB_STATUSES
 
 
+def job_sort_timestamp(job: dict[str, Any], fallback: float = 0.0) -> float:
+    for key in ("updated_at", "created_at"):
+        text = str(job.get(key) or "").strip()
+        if not text:
+            continue
+        try:
+            return time.mktime(time.strptime(text, "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            continue
+    return fallback
+
+
 def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     normalized = normalize_source_url(url)
@@ -2153,16 +2165,21 @@ def get_job(job_id: str):
 def list_jobs(limit: int = 20, mode: str = ""):
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     jobs = []
-    for p in sorted(JOBS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
+    for p in JOBS_DIR.glob("*.json"):
         try:
             job = json.loads(p.read_text(encoding="utf-8"))
             if mode and str(job.get("mode") or "summary") != mode:
                 continue
             if job.get("kurage_job_id") and job.get("status") not in {"done", "error"}:
                 job = refresh_from_kurage(job)
+            job["_sort_timestamp"] = job_sort_timestamp(job, p.stat().st_mtime)
             jobs.append(job)
         except Exception:
             pass
+    jobs.sort(key=lambda item: float(item.get("_sort_timestamp") or 0), reverse=True)
+    for job in jobs:
+        job.pop("_sort_timestamp", None)
+    jobs = jobs[:limit]
     return {"ok": True, "jobs": jobs}
 
 
