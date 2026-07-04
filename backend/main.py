@@ -100,6 +100,19 @@ def job_sort_timestamp(job: dict[str, Any], fallback: float = 0.0) -> float:
     return fallback
 
 
+def normalize_job_progress(job: dict[str, Any]) -> dict[str, Any]:
+    """Keep completed jobs visually complete even if older JSON kept stale progress."""
+    status = str(job.get("status") or "").strip().lower()
+    kurage_status = str(job.get("kurage_status") or "").strip().lower()
+    if status == "done" or kurage_status == "done":
+        job["status"] = "done"
+        job["progress"] = 100
+        if job.get("kurage_job_id"):
+            job["kurage_status"] = "done"
+            job["kurage_progress"] = 100
+    return job
+
+
 def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     normalized = normalize_source_url(url)
@@ -136,7 +149,7 @@ def load_job(job_id: str) -> dict[str, Any] | None:
     p = job_path(job_id)
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    return normalize_job_progress(json.loads(p.read_text(encoding="utf-8")))
 
 
 def save_job(job_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -2170,8 +2183,10 @@ def list_jobs(limit: int = 20, mode: str = ""):
             job = json.loads(p.read_text(encoding="utf-8"))
             if mode and str(job.get("mode") or "summary") != mode:
                 continue
+            job = normalize_job_progress(job)
             if job.get("kurage_job_id") and job.get("status") not in {"done", "error"}:
                 job = refresh_from_kurage(job)
+            job = normalize_job_progress(job)
             job["_sort_timestamp"] = job_sort_timestamp(job, p.stat().st_mtime)
             jobs.append(job)
         except Exception:
