@@ -1907,7 +1907,15 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
     elif status.get("status") == "error":
-        updates.update({"status": "error", "error": status.get("error") or "Kurage generation failed"})
+        current_progress = int(job.get("progress") or 0)
+        kurage_progress = int(status.get("progress") or 0)
+        failed_progress = max(current_progress, 55 + kurage_progress // 3 if kurage_progress else current_progress)
+        updates.update({
+            "status": "error",
+            "progress": min(failed_progress, 99),
+            "failed_at_progress": min(failed_progress, 99),
+            "error": status.get("error") or "Kurage generation failed",
+        })
     else:
         updates.update({"status": "generating", "progress": 55 + int(status.get("progress") or 0) // 3})
     return save_job(job["id"], **updates)
@@ -2022,7 +2030,15 @@ def process_job(job_id: str) -> None:
             time.sleep(15)
         raise RuntimeError("Kurage video generation timed out")
     except Exception as exc:
-        save_job(job_id, status="error", error=str(exc), progress=100)
+        current = load_job(job_id) or {}
+        failed_progress = int(current.get("progress") or 0)
+        save_job(
+            job_id,
+            status="error",
+            error=str(exc),
+            progress=min(max(failed_progress, 1), 99),
+            failed_at_progress=min(max(failed_progress, 1), 99),
+        )
 
 
 @app.get("/")
