@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.parse import urljoin
+from urllib.parse import urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -46,6 +47,17 @@ KAGENTREACH_NEWS_OPINION_SCRIPT = Path(
 app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+CREATE_JOB_LOCK = threading.Lock()
+ACTIVE_JOB_STATUSES = {
+    "queued",
+    "analyzing",
+    "downloading",
+    "transcribing",
+    "researching",
+    "planning",
+    "generating",
+}
+
 
 class CreateJobRequest(BaseModel):
     url: str
@@ -56,6 +68,52 @@ class CreateJobRequest(BaseModel):
 
 def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def normalize_source_url(url: str) -> str:
+    text = (url or "").strip()
+    parsed = urlparse(text)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = re.sub(r"/+$", "", parsed.path or "/")
+    host = netloc.split("@")[-1].split(":", 1)[0]
+    if host in {"x.com", "twitter.com", "mobile.twitter.com"}:
+        match = re.search(r"/(?:i/)?status(?:es)?/(\d+)", path)
+        if match:
+            return f"https://x.com/i/status/{match.group(1)}"
+    return urlunparse((scheme, netloc, path, "", parsed.query, ""))
+
+
+def is_active_job(job: dict[str, Any]) -> bool:
+    return str(job.get("status") or "").lower() in ACTIVE_JOB_STATUSES
+
+
+def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    normalized = normalize_source_url(url)
+    matches: list[dict[str, Any]] = []
+    for p in JOBS_DIR.glob("*.json"):
+        try:
+            job = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(job.get("mode") or "summary") != mode:
+            continue
+        if not is_active_job(job):
+            continue
+        if normalize_source_url(str(job.get("url") or "")) != normalized:
+            continue
+        if job.get("kurage_job_id") and job.get("status") not in {"done", "error"}:
+            try:
+                job = refresh_from_kurage(job)
+            except Exception:
+                pass
+        if is_active_job(job):
+            matches.append(job)
+    if not matches:
+        return None
+    matches.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    return matches[0]
 
 
 def job_path(job_id: str) -> Path:
@@ -2000,14 +2058,25 @@ def create_job(req: CreateJobRequest):
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail="http/https URL を入力してください")
-    job_id = uuid.uuid4().hex[:16]
     mode = req.mode.strip() or "summary"
     if mode not in {"summary", "news_opinions"}:
         raise HTTPException(status_code=400, detail="unsupported mode")
-    save_job(job_id, id=job_id, url=url, mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
-    thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
-    thread.start()
-    return {"ok": True, "job_id": job_id}
+    with CREATE_JOB_LOCK:
+        active = find_active_job_for_url(url, mode)
+        if active:
+            return {
+                "ok": True,
+                "job_id": active["id"],
+                "duplicate": True,
+                "status": active.get("status"),
+                "progress": active.get("progress", 0),
+                "message": "同じURLの生成がすでに進行中です。既存の生成状況を表示します。",
+            }
+        job_id = uuid.uuid4().hex[:16]
+        save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
+        thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
+        thread.start()
+        return {"ok": True, "job_id": job_id, "duplicate": False}
 
 
 @app.post("/api/jobs/{job_id}/regenerate")
@@ -2015,6 +2084,16 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
     current = load_job(job_id)
     if not current:
         raise HTTPException(status_code=404, detail="job not found")
+    if is_active_job(current):
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "duplicate": True,
+            "regenerated": False,
+            "status": current.get("status"),
+            "progress": current.get("progress", 0),
+            "message": "この動画は生成中です。完了またはエラーになるまで再生成は開始しません。",
+        }
     url = req.url.strip() or str(current.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="url is required")
@@ -2031,6 +2110,7 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
     replace_job(job_id, {
         "id": job_id,
         "url": url,
+        "normalized_url": normalize_source_url(url),
         "mode": mode,
         "status": "queued",
         "progress": 0,
