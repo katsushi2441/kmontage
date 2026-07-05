@@ -1413,17 +1413,33 @@ def extract_source_numbers(text: str) -> list[str]:
         r"steps?|parts?|blocks?|items?|conditions?|tools?|modes?|"
         r"sales?|visitors?|months?|years?"
     )
-    raw = re.findall(rf"(?:\$|¥)?\d[\d,.]*(?:\s?(?:{unit_pattern}))?", text or "", flags=re.I)
+    raw = re.findall(
+        rf"\b\d+\s?B\b|\b\d+\s?-\s?\d+\b|(?:\$|¥)?\d[\d,.]*(?:\s?(?:{unit_pattern}))?",
+        text or "",
+        flags=re.I,
+    )
+    large_percent_tokens = {
+        re.sub(r"[^\d]", "", v)
+        for v in raw
+        if re.search(r"[%％]", v) and int(re.sub(r"[^\d]", "", v) or "0") >= 50
+    }
     cleaned = []
     seen = set()
     for value in raw:
         v = re.sub(r"\s+", " ", value).strip().rstrip(".,")
         if len(v) <= 1:
             continue
+        # Whisper can occasionally turn "95% faster" into "9% faster" later in
+        # the transcript. If strong percentage claims are already present, do
+        # not force a one-digit percentage into the final script.
+        if re.fullmatch(r"\d[%％]", v) and large_percent_tokens:
+            continue
         # Bare one/two digit list markers such as 01., 02., 10. are section
         # numbers, not concrete evidence that must appear in a short script.
         has_unit_or_currency = bool(re.search(rf"(?:\$|¥|{unit_pattern})", v, flags=re.I))
-        if not has_unit_or_currency and re.fullmatch(r"\d{1,2}", v):
+        has_compact_model_size = bool(re.fullmatch(r"\d+\s?B", v, flags=re.I))
+        has_around_the_clock = bool(re.fullmatch(r"\d+\s?-\s?\d+", v))
+        if not (has_unit_or_currency or has_compact_model_size or has_around_the_clock) and re.fullmatch(r"\d{1,2}", v):
             continue
         key = v.lower()
         if key in seen:
@@ -1437,10 +1453,16 @@ def extract_source_terms(text: str) -> list[str]:
     candidates = re.findall(r"\b[A-Z][A-Za-z0-9.+_-]{2,}\b|\b(?:Claude|Kittle|Etsy|Google Drive|ListingView|Flux|Nano Banana|PNG|PDF|ADK|ReAct|YouTube|CapCut|HyperFrames)\b", text or "", flags=re.I)
     seen = set()
     terms = []
+    stop = {
+        "the", "and", "for", "this", "that", "with", "can", "now", "run",
+        "free", "using", "latest", "makes", "model", "today", "want", "show",
+        "you", "how", "forever", "new", "around", "from", "into", "something",
+        "actually", "use", "one", "single", "click", "just", "like",
+    }
     for term in candidates:
         t = term.strip()
         key = t.lower()
-        if key in seen or key in {"the", "and", "for", "this", "that", "with"}:
+        if key in seen or key in stop:
             continue
         seen.add(key)
         terms.append(t)
