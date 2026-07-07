@@ -141,6 +141,26 @@ def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
     return matches[0]
 
 
+def find_latest_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    normalized = normalize_source_url(url)
+    matches: list[dict[str, Any]] = []
+    for p in JOBS_DIR.glob("*.json"):
+        try:
+            job = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(job.get("mode") or "summary") != mode:
+            continue
+        if normalize_source_url(str(job.get("url") or "")) != normalized:
+            continue
+        matches.append(normalize_job_progress(job))
+    if not matches:
+        return None
+    matches.sort(key=job_sort_timestamp, reverse=True)
+    return matches[0]
+
+
 def job_path(job_id: str) -> Path:
     return JOBS_DIR / f"{job_id}.json"
 
@@ -1897,11 +1917,13 @@ def enqueue_kurage(
     *,
     source: str = "kmontage",
     source_name: str = "Kurage Montage",
+    overwrite_kurage_job_id: str = "",
 ) -> str:
     script = analysis.get("script") or {}
     reference = analysis.get("reference_analysis") or {}
     title = str(script.get("title") or reference.get("title") or "参照動画の要点解説").strip()
     payload = {
+        "job_id": overwrite_kurage_job_id,
         "title": title,
         "script": script,
         "source_url": url,
@@ -2076,6 +2098,7 @@ def process_job(job_id: str) -> None:
             str(job.get("video_style") or default_style),
             source=source,
             source_name=source_name,
+            overwrite_kurage_job_id=str(job.get("overwrite_kurage_job_id") or ""),
         )
         save_job(job_id, kurage_job_id=kurage_job_id, status="generating", progress=60)
 
@@ -2145,6 +2168,16 @@ def create_job(req: CreateJobRequest):
                 "progress": active.get("progress", 0),
                 "message": "同じURLの生成がすでに進行中です。既存の生成状況を表示します。",
             }
+        existing = find_latest_job_for_url(url, mode)
+        if existing:
+            return {
+                "ok": True,
+                "job_id": existing["id"],
+                "duplicate": True,
+                "status": existing.get("status"),
+                "progress": existing.get("progress", 0),
+                "message": "同じURLの生成済みジョブがあります。新規作成せず既存の生成状況を表示します。",
+            }
         job_id = uuid.uuid4().hex[:16]
         save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
         thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
@@ -2192,6 +2225,7 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
         "created_at": current.get("created_at") or now(),
         "regenerated_at": now(),
         "previous_kurage_job_id": old_kurage_job_id,
+        "overwrite_kurage_job_id": old_kurage_job_id or "",
     })
     thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
     thread.start()
