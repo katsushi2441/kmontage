@@ -43,6 +43,10 @@ KAGENTREACH_ROOT = Path(os.environ.get("KAGENTREACH_ROOT", "/home/kojima/work/ka
 KAGENTREACH_NEWS_OPINION_SCRIPT = Path(
     os.environ.get("KAGENTREACH_NEWS_OPINION_SCRIPT", str(KAGENTREACH_ROOT / "scripts" / "news-opinion-research.py"))
 )
+USE_CLAUDE_EDITOR = os.environ.get("KMONTAGE_USE_CLAUDE_EDITOR", "1").lower() not in {"0", "false", "no"}
+CLAUDE_BIN = os.environ.get("KMONTAGE_CLAUDE_BIN", "")
+CLAUDE_MODEL = os.environ.get("KMONTAGE_CLAUDE_MODEL", "sonnet")
+CLAUDE_TIMEOUT = int(os.environ.get("KMONTAGE_CLAUDE_TIMEOUT", "240"))
 
 app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -754,6 +758,252 @@ def parse_json_object(text: str) -> dict[str, Any]:
         if salvaged:
             return salvaged
         raise
+
+
+def resolve_claude_bin() -> str:
+    """Find Claude Code CLI, including the VS Code extension binary path."""
+    if CLAUDE_BIN:
+        return CLAUDE_BIN
+    found = shutil.which("claude")
+    if found:
+        return found
+    candidates = sorted(
+        Path.home().glob(".vscode-server/extensions/anthropic.claude-code-*/resources/native-binary/claude"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return ""
+
+
+def _compact_text(value: Any, limit: int = 900) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit]
+
+
+def build_editor_plan_prompt(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> str:
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    scene_digest = []
+    for scene in scenes[:12]:
+        if not isinstance(scene, dict):
+            continue
+        scene_digest.append({
+            "index": int(scene.get("index") or len(scene_digest)),
+            "narration": _compact_text(scene.get("narration"), 260),
+            "duration": int(scene.get("duration") or 10),
+        })
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    payload = {
+        "source_title": meta.get("title") or reference.get("title") or script.get("title"),
+        "source_uploader": meta.get("uploader") or meta.get("channel"),
+        "reference_analysis": reference,
+        "scene_plan": analysis.get("scene_plan") or {},
+        "script_scenes": scene_digest,
+        "source_excerpt": _compact_text(transcript, 1800),
+    }
+    return f"""
+あなたはFable 5的な短尺解説動画の編集者です。
+下記の台本を、より強い解説動画にするための編集方針だけをJSONで返してください。
+
+要件:
+- 台本本文は大きく書き換えない。編集方針、強調、テロップ、画面配置を設計する。
+- 冒頭3秒のフックを別枠で設計する。
+- 各シーンで「どこを強調するか」「テンポを上げるか」「字幕の強調語」「画面テロップ」を指定する。
+- テロップは日本語で短く、スマホ縦動画で読める長さにする。
+- caption_keywords はナレーション内に出てくる重要語を最大3個。長すぎる語句は禁止。
+- layout は top, center, lower, left, right のいずれか。
+- tempo は fast, normal, slow のいずれか。
+- emphasis は hook, proof, workflow, warning, closing, normal のいずれか。
+
+返すJSON形式:
+{{
+  "editor_plan": {{
+    "editing_policy": "編集方針を1文で",
+    "hook_3s": {{
+      "headline": "冒頭3秒の大きな見出し",
+      "subtitle": "短い補足",
+      "visual": "画面演出の指示"
+    }},
+    "tempo_notes": "全体のテンポ設計",
+    "scenes": [
+      {{
+        "index": 0,
+        "emphasis": "hook",
+        "tempo": "fast",
+        "overlay_badge": "HOOK",
+        "overlay_headline": "短い見出し",
+        "overlay_subtitle": "短い補足",
+        "caption_keywords": ["重要語1", "重要語2"],
+        "layout": "center",
+        "visual_note": "画面レイアウト指示"
+      }}
+    ]
+  }}
+}}
+
+入力:
+{json.dumps(payload, ensure_ascii=False)}
+""".strip()
+
+
+def request_claude_editor_plan(prompt: str, job_dir: Path) -> dict[str, Any] | None:
+    claude_bin = resolve_claude_bin()
+    if not USE_CLAUDE_EDITOR or not claude_bin:
+        return None
+    (job_dir / "editor_plan_prompt.txt").write_text(prompt, encoding="utf-8")
+    cmd = [
+        claude_bin,
+        "-p",
+        "--output-format",
+        "text",
+        "--permission-mode",
+        "dontAsk",
+        "--model",
+        CLAUDE_MODEL,
+        prompt,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT)
+        (job_dir / "editor_plan_response.txt").write_text(result.stdout or "", encoding="utf-8")
+        if result.returncode != 0:
+            (job_dir / "editor_plan_error.log").write_text(result.stderr or "", encoding="utf-8")
+            return None
+        parsed = parse_json_object(result.stdout or "")
+        plan = parsed.get("editor_plan") if isinstance(parsed, dict) else None
+        if isinstance(plan, dict):
+            plan.setdefault("generated_by", "claude_cli")
+            plan.setdefault("claude_model", CLAUDE_MODEL)
+            return plan
+        return None
+    except Exception as exc:
+        (job_dir / "editor_plan_error.log").write_text(str(exc), encoding="utf-8")
+        return None
+
+
+def _keyword_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9.+#-]{1,18}|[一-龠々ァ-ヶー]{2,8}", text):
+        word = match.group(0).strip("、。,.!！?？")
+        if len(word) < 2 or len(word) > 18:
+            continue
+        if word in {"これ", "それ", "ここ", "ため", "よう", "まず", "そして", "つまり", "今回", "動画"}:
+            continue
+        if word not in candidates:
+            candidates.append(word)
+        if len(candidates) >= 3:
+            break
+    return candidates
+
+
+def fallback_editor_plan(analysis: dict[str, Any]) -> dict[str, Any]:
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    title = str(script.get("title") or "参照動画の要点解説").strip()
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    plan_scenes: list[dict[str, Any]] = []
+    total = len(scenes)
+    for i, scene in enumerate(scenes[:12]):
+        narration = str(scene.get("narration") or "").strip()
+        if i == 0:
+            emphasis = "hook"
+            tempo = "fast"
+            badge = "HOOK"
+            layout = "center"
+            headline = title[:24]
+            subtitle = narration[:34]
+        elif i == total - 1:
+            emphasis = "closing"
+            tempo = "slow"
+            badge = "結論"
+            layout = "lower"
+            headline = "ここが結論"
+            subtitle = narration[:34]
+        elif i in {1, 2}:
+            emphasis = "proof"
+            tempo = "fast"
+            badge = "POINT"
+            layout = "top"
+            headline = "見るべきポイント"
+            subtitle = narration[:34]
+        else:
+            emphasis = "workflow"
+            tempo = "normal"
+            badge = "解説"
+            layout = "top"
+            headline = "要点を整理"
+            subtitle = narration[:34]
+        plan_scenes.append({
+            "index": i,
+            "emphasis": emphasis,
+            "tempo": tempo,
+            "overlay_badge": badge,
+            "overlay_headline": headline,
+            "overlay_subtitle": subtitle,
+            "caption_keywords": _keyword_candidates(narration),
+            "layout": layout,
+            "visual_note": "White Studio style with clear smartphone telops",
+        })
+    return {
+        "generated_by": "fallback_rules",
+        "editing_policy": "冒頭で結論を出し、証拠と手順をテンポよく見せ、最後に行動へ落とす。",
+        "hook_3s": {
+            "headline": title[:24],
+            "subtitle": "最初の3秒で要点を提示",
+            "visual": "中央に白カードと強い見出しを表示",
+        },
+        "tempo_notes": "冒頭と証拠シーンは速く、結論は少し間を取る。",
+        "scenes": plan_scenes,
+    }
+
+
+def apply_editor_plan(analysis: dict[str, Any], editor_plan: dict[str, Any]) -> dict[str, Any]:
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    plan_scenes = editor_plan.get("scenes") if isinstance(editor_plan.get("scenes"), list) else []
+    by_index = {
+        int(scene.get("index")): scene
+        for scene in plan_scenes
+        if isinstance(scene, dict) and str(scene.get("index", "")).isdigit()
+    }
+    hook = editor_plan.get("hook_3s") if isinstance(editor_plan.get("hook_3s"), dict) else {}
+    cleaned: list[dict[str, Any]] = []
+    for i, scene in enumerate(scenes):
+        if not isinstance(scene, dict):
+            continue
+        merged = dict(scene)
+        p = by_index.get(i, {})
+        merged["editor_emphasis"] = str(p.get("emphasis") or ("hook" if i == 0 else "normal"))
+        merged["editor_tempo"] = str(p.get("tempo") or ("fast" if i == 0 else "normal"))
+        merged["layout"] = str(p.get("layout") or ("center" if i == 0 else "top"))
+        if p.get("overlay_badge") or i == 0:
+            merged["overlay_badge"] = str(p.get("overlay_badge") or "HOOK")[:16]
+        if p.get("overlay_headline") or (i == 0 and hook.get("headline")):
+            merged["overlay_headline"] = str(p.get("overlay_headline") or hook.get("headline") or "")[:34]
+        if p.get("overlay_subtitle") or (i == 0 and hook.get("subtitle")):
+            merged["overlay_subtitle"] = str(p.get("overlay_subtitle") or hook.get("subtitle") or "")[:52]
+        keywords = p.get("caption_keywords")
+        if isinstance(keywords, list):
+            merged["caption_keywords"] = [str(k).strip()[:18] for k in keywords if str(k).strip()][:3]
+        else:
+            merged["caption_keywords"] = _keyword_candidates(str(merged.get("narration") or ""))
+        if p.get("visual_note"):
+            merged["editor_visual_note"] = str(p.get("visual_note"))[:140]
+        cleaned.append(merged)
+    script["scenes"] = cleaned
+    analysis["script"] = script
+    analysis["editor_plan"] = editor_plan
+    return analysis
+
+
+def enrich_with_editor_plan(analysis: dict[str, Any], meta: dict[str, Any], transcript: str, job_dir: Path) -> dict[str, Any]:
+    prompt = build_editor_plan_prompt(analysis, meta, transcript)
+    editor_plan = request_claude_editor_plan(prompt, job_dir)
+    if not editor_plan:
+        editor_plan = fallback_editor_plan(analysis)
+    (job_dir / "editor_plan.json").write_text(json.dumps(editor_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    return apply_editor_plan(analysis, editor_plan)
 
 
 def _json_string_value(raw: str) -> str:
@@ -1881,6 +2131,10 @@ def write_openmontage_artifacts(job_dir: Path, analysis: dict[str, Any]) -> None
         json.dumps(analysis.get("script") or {}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    (job_dir / "editor_plan.json").write_text(
+        json.dumps(analysis.get("editor_plan") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     (job_dir / "qa.json").write_text(
         json.dumps(analysis.get("qa") or {}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -2043,6 +2297,7 @@ def process_job(job_id: str) -> None:
         else:
             save_job(job_id, status="planning", progress=45)
             analysis = analyze_reference(url, kind, meta, transcript, job_dir)
+        analysis = enrich_with_editor_plan(analysis, meta, transcript, job_dir)
         reference = analysis.get("reference_analysis") or {}
         scene_plan = analysis.get("scene_plan") or {}
         script = analysis.get("script") or {}
@@ -2053,6 +2308,7 @@ def process_job(job_id: str) -> None:
             reference_analysis=reference,
             scene_plan=scene_plan,
             script=script,
+            editor_plan=analysis.get("editor_plan") or {},
             title=script.get("title") or scene_plan.get("title") or reference.get("title"),
             summary=summary,
             script_outline=[s.get("message") or s.get("role") for s in (scene_plan.get("scenes") or []) if isinstance(s, dict)],
