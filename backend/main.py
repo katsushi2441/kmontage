@@ -1429,6 +1429,16 @@ def extract_source_numbers(text: str) -> list[str]:
         v = re.sub(r"\s+", " ", value).strip().rstrip(".,")
         if len(v) <= 1:
             continue
+        # Treat numbering artifacts, section markers, and standalone years as
+        # structure, not required evidence. Otherwise long X articles with
+        # headings like "4.1" or years such as "2026" fail the anti-fake gate
+        # even when the script faithfully preserves the concrete methods.
+        if re.fullmatch(r"\d+(?:\.\d+)+", v):
+            continue
+        if re.fullmatch(r"\d+\.\s*[一-龯ぁ-んァ-ヶA-Za-z]+", v):
+            continue
+        if re.fullmatch(r"(?:19|20)\d{2}年?", v):
+            continue
         # Whisper can occasionally turn "95% faster" into "9% faster" later in
         # the transcript. If strong percentage claims are already present, do
         # not force a one-digit percentage into the final script.
@@ -1439,7 +1449,7 @@ def extract_source_numbers(text: str) -> list[str]:
         has_unit_or_currency = bool(re.search(rf"(?:\$|¥|{unit_pattern})", v, flags=re.I))
         has_compact_model_size = bool(re.fullmatch(r"\d+\s?B", v, flags=re.I))
         has_around_the_clock = bool(re.fullmatch(r"\d+\s?-\s?\d+", v))
-        if not (has_unit_or_currency or has_compact_model_size or has_around_the_clock) and re.fullmatch(r"\d{1,2}", v):
+        if not (has_unit_or_currency or has_compact_model_size or has_around_the_clock) and re.fullmatch(r"\d+", v):
             continue
         key = v.lower()
         if key in seen:
