@@ -924,18 +924,6 @@ def request_ollama_editor_plan(prompt: str, job_dir: Path) -> dict[str, Any] | N
     return None
 
 
-def legacy_editor_plan(reason: str) -> dict[str, Any]:
-    """Fall back to the pre-editor pipeline without Codex-made telop ideas."""
-    return {
-        "generated_by": "legacy_no_editor",
-        "reason": reason,
-        "editing_policy": "Use the previous Kurage rendering flow without editor-plan telop enrichment.",
-        "hook_3s": {},
-        "tempo_notes": "",
-        "scenes": [],
-    }
-
-
 def _keyword_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     for match in re.finditer(r"[A-Za-z][A-Za-z0-9.+#-]{1,18}|[一-龠々ァ-ヶー]{2,8}", text):
@@ -1012,9 +1000,6 @@ def fallback_editor_plan(analysis: dict[str, Any]) -> dict[str, Any]:
 
 
 def apply_editor_plan(analysis: dict[str, Any], editor_plan: dict[str, Any]) -> dict[str, Any]:
-    if editor_plan.get("generated_by") == "legacy_no_editor":
-        analysis["editor_plan"] = editor_plan
-        return analysis
     script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
     scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
     plan_scenes = editor_plan.get("scenes") if isinstance(editor_plan.get("scenes"), list) else []
@@ -1059,7 +1044,7 @@ def enrich_with_editor_plan(analysis: dict[str, Any], meta: dict[str, Any], tran
     if not editor_plan:
         editor_plan = request_ollama_editor_plan(prompt, job_dir)
     if not editor_plan:
-        editor_plan = legacy_editor_plan("claude_and_ollama_failed")
+        raise RuntimeError("Claude/Ollama editor plan generation failed; refusing degraded video without editor telops")
     (job_dir / "editor_plan.json").write_text(json.dumps(editor_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     return apply_editor_plan(analysis, editor_plan)
 
