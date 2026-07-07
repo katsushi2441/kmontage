@@ -813,6 +813,9 @@ def build_editor_plan_prompt(analysis: dict[str, Any], meta: dict[str, Any], tra
 - 冒頭3秒のフックを別枠で設計する。
 - 各シーンで「どこを強調するか」「テンポを上げるか」「字幕の強調語」「画面テロップ」を指定する。
 - テロップは日本語で短く、スマホ縦動画で読める長さにする。
+- overlay_headline / overlay_subtitle / caption_keywords は必ず元動画・元記事の内容に関係する言葉だけにする。
+- 「編集方針」「動画生成」「AIが設計」「テロップ」「Kurageの仕組み」など制作側のメタ説明を画面テロップに出してはいけない。
+- 視聴者が見たいのは題材の中身。今回なら題材の主張・数字・手順・注意点をテロップにする。
 - caption_keywords はナレーション内に出てくる重要語を最大3個。長すぎる語句は禁止。
 - layout は top, center, lower, left, right のいずれか。
 - tempo は fast, normal, slow のいずれか。
@@ -881,6 +884,44 @@ def request_claude_editor_plan(prompt: str, job_dir: Path) -> dict[str, Any] | N
     except Exception as exc:
         (job_dir / "editor_plan_error.log").write_text(str(exc), encoding="utf-8")
         return None
+
+
+def request_ollama_editor_plan(prompt: str, job_dir: Path) -> dict[str, Any] | None:
+    """Use Ollama gemma4:12b as the editor when Claude CLI is unavailable."""
+    raw_response = ""
+    try:
+        raw_response = ollama_generate(prompt, job_dir, "editor_plan_ollama", temperature=0.08, num_predict=4096)
+        (job_dir / "editor_plan_ollama_response.txt").write_text(raw_response or "", encoding="utf-8")
+        parsed = parse_json_object(raw_response or "")
+        plan = parsed.get("editor_plan") if isinstance(parsed, dict) else None
+        if isinstance(plan, dict):
+            plan.setdefault("generated_by", "ollama")
+            plan.setdefault("ollama_model", OLLAMA_MODEL)
+            return plan
+    except Exception as exc:
+        (job_dir / "editor_plan_ollama_error.log").write_text(str(exc), encoding="utf-8")
+    if raw_response:
+        try:
+            repair_prompt = f"""
+次のOllama応答を、指定された editor_plan JSON 形式だけに修復してください。
+説明文、Markdown、コードフェンスは禁止。JSONのみ。
+画面テロップは必ず題材の中身だけにし、「編集方針」「動画生成」「AIが設計」「Kurageの仕組み」など制作側のメタ説明は禁止。
+
+元応答:
+{raw_response[:6000]}
+""".strip()
+            repaired = ollama_generate(repair_prompt, job_dir, "editor_plan_ollama_repair", temperature=0.02, num_predict=4096)
+            (job_dir / "editor_plan_ollama_repair_response.txt").write_text(repaired or "", encoding="utf-8")
+            parsed = parse_json_object(repaired or "")
+            plan = parsed.get("editor_plan") if isinstance(parsed, dict) else None
+            if isinstance(plan, dict):
+                plan.setdefault("generated_by", "ollama")
+                plan.setdefault("ollama_model", OLLAMA_MODEL)
+                plan.setdefault("repaired", True)
+                return plan
+        except Exception as exc:
+            (job_dir / "editor_plan_ollama_repair_error.log").write_text(str(exc), encoding="utf-8")
+    return None
 
 
 def _keyword_candidates(text: str) -> list[str]:
@@ -1001,7 +1042,9 @@ def enrich_with_editor_plan(analysis: dict[str, Any], meta: dict[str, Any], tran
     prompt = build_editor_plan_prompt(analysis, meta, transcript)
     editor_plan = request_claude_editor_plan(prompt, job_dir)
     if not editor_plan:
-        editor_plan = fallback_editor_plan(analysis)
+        editor_plan = request_ollama_editor_plan(prompt, job_dir)
+    if not editor_plan:
+        raise RuntimeError("Claude/Ollama editor plan generation failed; refusing degraded video without editor telops")
     (job_dir / "editor_plan.json").write_text(json.dumps(editor_plan, ensure_ascii=False, indent=2), encoding="utf-8")
     return apply_editor_plan(analysis, editor_plan)
 
