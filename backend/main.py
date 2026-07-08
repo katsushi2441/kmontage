@@ -59,6 +59,51 @@ ACTIVE_JOB_STATUSES = {
 }
 
 
+def mark_interrupted_jobs_on_startup() -> None:
+    """Mark jobs owned by a previous kmontage API process as failed.
+
+    kmontage uses in-process background threads to analyze references and wait
+    for Kurage rendering. A service restart kills those threads, so active jobs
+    cannot continue. Marking them on startup prevents a misleading permanent
+    "generating" state and exposes the reason in the UI/history.
+    """
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    restarted_at = now()
+    marked = 0
+    for path in JOBS_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        status = str(data.get("status") or "").lower()
+        if status not in ACTIVE_JOB_STATUSES:
+            continue
+        reason = (
+            f"Kurage Montage API restarted while job was {status}; "
+            "the in-process worker thread was interrupted. Regenerate this job."
+        )
+        data.update({
+            "status": "error",
+            "error": reason,
+            "interrupted_status": status,
+            "failed_at_progress": data.get("progress", 0),
+            "interrupted_at": restarted_at,
+            "updated_at": restarted_at,
+        })
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        print(f"[{path.stem}] marked interrupted kmontage job as error: {reason}", flush=True)
+        marked += 1
+    if marked:
+        print(f"[startup] marked {marked} interrupted kmontage job(s)", flush=True)
+
+
+@app.on_event("startup")
+def _startup_mark_interrupted_jobs() -> None:
+    mark_interrupted_jobs_on_startup()
+
+
 class CreateJobRequest(BaseModel):
     url: str
     vtuber_mode: bool = True
@@ -1969,6 +2014,10 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
             "progress": 100,
             "video_url": f"https://kurage.exbridge.jp/kuragev.php?id={kurage_job_id}",
             "kurage_video_endpoint": f"{KURAGE_API}/video/{kurage_job_id}",
+            "error": None,
+            "failed_at_progress": None,
+            "interrupted_status": None,
+            "interrupted_at": None,
         })
         try:
             report = {
