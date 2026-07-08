@@ -109,6 +109,12 @@ class CreateJobRequest(BaseModel):
     vtuber_mode: bool = True
     video_style: str = "ai_avatar_explainer"
     mode: str = "summary"
+    # テロップ編集者: normal=決定的ヒューリスティック / llm=claude→gemma4 fail-open
+    editor_mode: str = "normal"
+
+
+def normalize_editor_mode(value: str) -> str:
+    return "llm" if str(value or "").strip().lower() == "llm" else "normal"
 
 
 def now() -> str:
@@ -1121,8 +1127,8 @@ X投稿URLの場合の最重要ルール:
 - 動画の主役は「みんなの意見」。12シーン中8シーン以上を、共感数上位コメントやWeb/YouTube/Xの反応整理に使う。
 - 1シーン目はサムネを意識する。ニュースの争点と、共感数上位の代表意見は narration と後段のHyperFramesテロップで伝える。画像生成AIに日本語文字を描かせない。
 - 1シーン目の narration は短く、ニュースの争点 + 代表意見を45〜80字程度で言い切る。
-- image_prompt は明るいWhite Studioで、黒背景禁止。冒頭は thumbnail-like vertical composition, blank headline panels without text, news issue + top public opinion visual metaphor を必ず含める。
-- image_prompt には no text, no letters, no numbers, blank cards only を入れる。カードやUIは空欄にし、読ませたい文字はHyperFramesで重ねる前提にする。
+- image_prompt は明るいWhite Studioで、黒背景禁止。冒頭は hero visual metaphor of the news issue, bold single subject, clean negative space in lower third for captions を必ず含める。空白の看板・空のカード・枠だけのUIを描かせない(のっぺりした未完成な絵になるため)。
+- image_prompt には no text, no letters, no numbers を入れる。読ませたい文字はHyperFramesテロップで重ねる前提にする。
 - ニュース紹介だけで終わらず、賛成・懸念・実務目線・今後の見方など、複数の意見を整理する。
 - 台本は自然な日本語。英語原文をそのまま貼らない。
 - 60〜120秒、12シーン、各8〜10秒程度。
@@ -1239,8 +1245,8 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
         if not any(word in joined for word in ["Xリプライ", "リプライ", "いいね"]):
             issues.append("missing_x_reply_framing")
     first_prompt = str(scenes[0].get("image_prompt") or "").lower() if scenes else ""
-    if scenes and not any(word in first_prompt for word in ["thumbnail", "headline", "card", "text"]):
-        issues.append("opening_visual_not_thumbnail_like")
+    if scenes and not any(word in first_prompt for word in ["hero", "metaphor", "negative space", "thumbnail", "headline"]):
+        issues.append("opening_visual_not_hero_like")
     if len(points) >= 3:
         used = 0
         for term in extract_source_terms(source_text)[:10]:
@@ -1303,9 +1309,9 @@ def compact_news_opinion_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         narration = shorten_news_narration(str(scene.get("narration") or ""), 82 if len(cleaned) else 78)
         if not narration:
             continue
-        prompt = str(scene.get("image_prompt") or "bright white studio vertical news opinion explainer, Kurage avatar, clean cards, 9:16").strip()
-        if not cleaned and "thumbnail" not in prompt.lower():
-            prompt = "thumbnail-like vertical composition, blank headline panels without text, news issue + top public opinion visual metaphor, bright white studio, Kurage avatar explainer, no text, no letters, no numbers"
+        prompt = str(scene.get("image_prompt") or "bright white studio vertical news opinion explainer, Kurage avatar, 9:16").strip()
+        if not cleaned and not any(w in prompt.lower() for w in ("hero", "metaphor", "negative space", "thumbnail")):
+            prompt = "hero visual metaphor of the news issue, bold single subject, clean negative space in lower third for captions, bright white studio, Kurage avatar explainer, vertical 9:16, no text, no letters, no numbers"
         cleaned.append({
             "index": len(cleaned),
             "narration": narration,
@@ -1963,6 +1969,7 @@ def enqueue_kurage(
     source: str = "kmontage",
     source_name: str = "Kurage Montage",
     overwrite_kurage_job_id: str = "",
+    editor_mode: str = "normal",
 ) -> str:
     script = analysis.get("script") or {}
     reference = analysis.get("reference_analysis") or {}
@@ -1978,6 +1985,7 @@ def enqueue_kurage(
         "source": source,
         "vtuber_mode": vtuber_mode,
         "video_style": video_style,
+        "editor_mode": editor_mode,
     }
     res = requests.post(f"{KURAGE_API}/generate_from_script", json=payload, timeout=60)
     res.raise_for_status()
@@ -2148,6 +2156,7 @@ def process_job(job_id: str) -> None:
             source=source,
             source_name=source_name,
             overwrite_kurage_job_id=str(job.get("overwrite_kurage_job_id") or ""),
+            editor_mode=normalize_editor_mode(str(job.get("editor_mode") or "normal")),
         )
         save_job(job_id, kurage_job_id=kurage_job_id, status="generating", progress=60)
 
@@ -2228,7 +2237,7 @@ def create_job(req: CreateJobRequest):
                 "message": "同じURLの生成済みジョブがあります。新規作成せず既存の生成状況を表示します。",
             }
         job_id = uuid.uuid4().hex[:16]
-        save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, created_at=now())
+        save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, editor_mode=normalize_editor_mode(req.editor_mode), created_at=now())
         thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
         thread.start()
         return {"ok": True, "job_id": job_id, "duplicate": False}
@@ -2271,6 +2280,7 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
         "progress": 0,
         "vtuber_mode": req.vtuber_mode,
         "video_style": req.video_style,
+        "editor_mode": normalize_editor_mode(req.editor_mode),
         "created_at": current.get("created_at") or now(),
         "regenerated_at": now(),
         "previous_kurage_job_id": old_kurage_job_id,
