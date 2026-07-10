@@ -1234,13 +1234,25 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
         x_reply_markers = [
             "Xリプライ", "リプライ", "いいね", "反応", "賛成", "反対", "懸念", "指摘",
             "期待", "ワクワク", "本気", "覚悟", "参謀", "提案", "ファン", "ユーモア",
-            "興味", "議論", "支持",
+            "興味", "議論", "支持", "評価", "実務", "不満", "ハードル", "注意",
         ]
         x_reply_scene_count = sum(
             1 for n in narrations
             if any(word in n for word in x_reply_markers)
         )
-        if x_reply_scene_count < 6:
+        # X-only explainers can have a strong source post plus fewer, but still
+        # concrete, reply-reaction scenes. Requiring 6 scenes incorrectly blocked
+        # long-form X posts such as Reddit guides even when five reply scenes were
+        # present and the script was source-faithful. Keep the gate strict enough
+        # to reject generic filler, but do not force a news-comment ratio on
+        # tutorial/guide posts.
+        has_other_reaction_sources = any(
+            isinstance(opinions.get("sources"), dict)
+            and ((opinions.get("sources") or {}).get(key) or [])
+            for key in ["yahoo_comments", "web", "youtube", "x"]
+        )
+        required_x_reply_scenes = 6 if has_other_reaction_sources else 4
+        if x_reply_scene_count < required_x_reply_scenes:
             issues.append(f"too_few_x_reply_scenes:{x_reply_scene_count}")
         if not any(word in joined for word in ["Xリプライ", "リプライ", "いいね"]):
             issues.append("missing_x_reply_framing")
