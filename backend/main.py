@@ -1607,10 +1607,23 @@ def quality_source_text(meta: dict[str, Any], transcript: str) -> str:
 
 
 def quality_source_numbers(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> list[str]:
-    """Prefer LLM-extracted evidence numbers over noisy YouTube descriptions."""
+    """Prefer source-level headline/evidence numbers over noisy long transcripts.
+
+    Long-form reference videos often contain many incidental numbers in side
+    conversations: line counts, percentages in examples, prices in unrelated
+    anecdotes, timestamps, etc. The anti-fake gate should require the numbers
+    that identify the referenced post/video, not every number Whisper captured
+    from an hour-long discussion.
+    """
     reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
     evidence = reference.get("evidence_numbers") if isinstance(reference.get("evidence_numbers"), list) else []
     evidence_numbers = extract_source_numbers("\n".join(str(x) for x in evidence))
+    meta_numbers = extract_source_numbers("\n".join([
+        str(meta.get("title") or ""),
+        str(meta.get("description") or ""),
+    ]))
+    if meta_numbers:
+        return list(dict.fromkeys(meta_numbers + evidence_numbers))[:12]
     if len(evidence_numbers) >= 3:
         return evidence_numbers[:12]
     return extract_source_numbers(quality_source_text(meta, transcript))[:12]
