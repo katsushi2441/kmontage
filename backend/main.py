@@ -1492,12 +1492,12 @@ def extract_source_numbers(text: str) -> list[str]:
     unit_pattern = (
         r"ドル|円|万円|万|億|%|％|割|つ|個|枚|件|社|人|回|"
         r"ステップ|項目|条件|モード|ツール|ブロック|パート|章|"
-        r"RPM|views?|再生|日|週|週間|ヶ月|カ月|年|時間|分|"
+        r"RPM|views?|再生|日|週|週間|ヶ月|カ月|年|時間|分|秒|"
         r"steps?|parts?|blocks?|items?|conditions?|tools?|modes?|"
-        r"sales?|visitors?|months?|years?"
+        r"sales?|visitors?|seconds?|minutes?|hours?|days?|weeks?|months?|years?"
     )
     raw = re.findall(
-        rf"\b\d+\s?B\b|\b\d+\s?-\s?\d+\b|(?:\$|¥)?\d[\d,.]*(?:\s?(?:{unit_pattern}))?",
+        rf"\b\d+\s?B\b|(?<!\d)\d+\s*[-–—〜~～]\s*\d+(?:\s?(?:{unit_pattern}))?|(?:\$|¥)?\d[\d,.]*(?:\s?(?:{unit_pattern}))?",
         text or "",
         flags=re.I,
     )
@@ -1531,7 +1531,7 @@ def extract_source_numbers(text: str) -> list[str]:
         # numbers, not concrete evidence that must appear in a short script.
         has_unit_or_currency = bool(re.search(rf"(?:\$|¥|{unit_pattern})", v, flags=re.I))
         has_compact_model_size = bool(re.fullmatch(r"\d+\s?B", v, flags=re.I))
-        has_around_the_clock = bool(re.fullmatch(r"\d+\s?-\s?\d+", v))
+        has_around_the_clock = bool(re.fullmatch(rf"\d+\s*[-–—〜~～]\s*\d+(?:\s?(?:{unit_pattern}))?", v, flags=re.I))
         if not (has_unit_or_currency or has_compact_model_size or has_around_the_clock) and re.fullmatch(r"\d+", v):
             continue
         key = v.lower()
