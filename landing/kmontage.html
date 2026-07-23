@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kurage Montage — URLを1つ渡すだけで、Kurageさんが解説ショート動画にします</title>
+<meta name="description" content="Kurage Montage(kmontage)は、X投稿・YouTube・ブログ/記事・PDFのURLを渡すと、AI VTuberのKurageさんが読み解いて日本語の解説ショート動画にするツールです。元ネタを抽出・文字起こしし、ローカルLLMで12シーンの台本を構成。忠実性と日本語品質のゲートを通過したものだけを動画化します。">
+<meta name="keywords" content="Kurage,kmontage,AI VTuber,解説動画,ショート動画,YouTube,PDF,Ollama,OpenMontage,exbridge,動画自動生成">
+<meta name="robots" content="index,follow">
+<meta name="author" content="EXBRIDGE, Inc.">
+<link rel="canonical" href="https://kmontage.exbridge.jp/kmontage.html">
+<link rel="alternate" hreflang="en" href="https://kmontage.exbridge.jp/">
+<link rel="alternate" hreflang="ja" href="https://kmontage.exbridge.jp/kmontage.html">
+<link rel="icon" href="assets/kurage_avatar.png" type="image/png">
+<link rel="apple-touch-icon" href="assets/kurage_avatar.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Kurage Montage">
+<meta property="og:title" content="Kurage Montage — URL1つで、Kurageさんの解説ショート動画に">
+<meta property="og:description" content="X投稿・YouTube・ブログ/記事・PDFのURLを渡すと、Kurageさんが読み解いて日本語の解説ショート動画に。台本は忠実性ゲートを通過したものだけ動画化します。">
+<meta property="og:url" content="https://kmontage.exbridge.jp/kmontage.html">
+<meta property="og:image" content="https://kmontage.exbridge.jp/assets/kurage_avatar.png">
+<meta property="og:image:width" content="1024">
+<meta property="og:image:height" content="1024">
+<meta property="og:locale" content="ja_JP">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Kurage Montage">
+<meta name="twitter:description" content="URL1つで、Kurageさんの日本語解説ショート動画に。">
+<meta name="twitter:image" content="https://kmontage.exbridge.jp/assets/kurage_avatar.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "Kurage Montage",
+  "url": "https://kmontage.exbridge.jp/kmontage.html",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "Web",
+  "description": "X・YouTube・ブログ/記事・PDFのURLを、AI VTuberのKurageさんが日本語の解説ショート動画にするツール。",
+  "provider": { "@type": "Organization", "name": "EXBRIDGE, Inc.", "url": "https://exbridge.jp/" }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@700;900&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --abyss:#12202f; --abyss-soft:#55697a; --foam:#f5fbfb; --panel:#e7f3f2; --panel-line:#cde5e2;
+  --teal:#12a99f; --teal-deep:#0a726b; --violet:#6f5fd8; --gold:#c98a1e; --gold-bg:#fbf2db; --gold-line:#ecd9a8;
+  --shadow:0 14px 40px rgba(10,40,45,.10);
+}
+@media (prefers-color-scheme:dark){:root{
+  --abyss:#eaf3f3; --abyss-soft:#9fb3ba; --foam:#0c1720; --panel:#12242a; --panel-line:#1f3a3f;
+  --teal:#2bd4c6; --teal-deep:#1c9e93; --violet:#9186ea; --gold:#f2c766; --gold-bg:#241b08; --gold-line:#4c3c17;
+  --shadow:0 14px 40px rgba(0,0,0,.38);
+}}
+:root[data-theme="dark"]{--abyss:#eaf3f3;--abyss-soft:#9fb3ba;--foam:#0c1720;--panel:#12242a;--panel-line:#1f3a3f;--teal:#2bd4c6;--teal-deep:#1c9e93;--violet:#9186ea;--gold:#f2c766;--gold-bg:#241b08;--gold-line:#4c3c17;--shadow:0 14px 40px rgba(0,0,0,.38);}
+:root[data-theme="light"]{--abyss:#12202f;--abyss-soft:#55697a;--foam:#f5fbfb;--panel:#e7f3f2;--panel-line:#cde5e2;--teal:#12a99f;--teal-deep:#0a726b;--violet:#6f5fd8;--gold:#c98a1e;--gold-bg:#fbf2db;--gold-line:#ecd9a8;--shadow:0 14px 40px rgba(10,40,45,.10);}
+* { box-sizing:border-box; margin:0; padding:0; }
+html { scroll-behavior:smooth; }
+body { color:var(--abyss); font-family:"Zen Kaku Gothic New","Hiragino Sans","Yu Gothic",Meiryo,sans-serif; background:var(--foam); min-height:100vh; line-height:1.8; overflow-x:hidden; }
+a { color:var(--teal-deep); text-decoration:none; }
+a:hover { color:var(--teal); }
+img { max-width:100%; }
+h1,h2,h3 { font-family:"Zen Maru Gothic","Zen Kaku Gothic New",sans-serif; text-wrap:balance; }
+.wrap { max-width:1000px; margin:0 auto; padding:0 24px; }
+header.site { position:sticky; top:0; z-index:40; background:color-mix(in srgb,var(--foam) 88%,transparent); backdrop-filter:blur(16px); border-bottom:1px solid var(--panel-line); }
+header.site .wrap { display:flex; align-items:center; gap:14px; padding:12px 24px; }
+.hbrand { display:flex; gap:12px; align-items:center; }
+.hbrand .ico { width:40px; height:40px; border-radius:50%; overflow:hidden; border:2px solid var(--teal); flex:none; }
+.hbrand .ico img { width:100%; height:100%; object-fit:cover; object-position:50% 15%; }
+.hbrand strong { font-size:15px; font-weight:900; display:block; line-height:1.2; }
+.hbrand span { font-size:11px; color:var(--abyss-soft); }
+.hnav { display:flex; gap:8px; align-items:center; margin-left:auto; }
+.btn { border-radius:999px; padding:10px 18px; font-weight:900; font-size:13px; display:inline-flex; align-items:center; gap:7px; border:1.5px solid transparent; cursor:pointer; }
+.btn-primary { background:linear-gradient(135deg,var(--teal),var(--teal-deep)); color:#fff; box-shadow:0 10px 24px rgba(18,169,159,.28); }
+.btn-ghost { background:transparent; border-color:var(--panel-line); color:var(--abyss-soft); }
+.btn-ghost:hover { border-color:var(--teal); color:var(--teal-deep); }
+.hero { display:grid; grid-template-columns:1.25fr .75fr; gap:40px; align-items:center; padding:56px 0 34px; }
+.eyebrow { display:inline-flex; align-items:center; gap:8px; background:var(--panel); border:1.5px solid var(--panel-line); border-radius:999px; padding:7px 14px; font-size:12px; font-weight:900; color:var(--teal-deep); margin-bottom:18px; }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--teal); }
+h1 { font-size:clamp(26px,4.4vw,42px); font-weight:900; line-height:1.3; letter-spacing:-.01em; margin-bottom:16px; }
+h1 em { font-style:normal; color:var(--teal-deep); }
+.lead { font-size:15.5px; color:var(--abyss-soft); max-width:600px; margin-bottom:24px; }
+.lead b { color:var(--abyss); }
+.cta-row { display:flex; gap:10px; flex-wrap:wrap; }
+.hero-card { background:var(--panel); border:1.5px solid var(--panel-line); border-radius:28px; padding:24px; text-align:center; box-shadow:var(--shadow); }
+.hero-card img { width:180px; height:180px; object-fit:cover; object-position:50% 12%; border-radius:22px; }
+.hero-card h2 { font-size:15px; margin:14px 0 4px; }
+.hero-card p { font-size:12.5px; color:var(--abyss-soft); }
+section { padding:34px 0; }
+section > h2 { font-size:clamp(20px,3vw,27px); font-weight:900; margin-bottom:6px; }
+section > .sub { color:var(--abyss-soft); font-size:14px; font-weight:700; margin-bottom:24px; }
+.flow { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; }
+.flow .step { background:var(--foam); border:1.5px solid var(--panel-line); border-radius:18px; padding:20px 16px; box-shadow:var(--shadow); }
+.flow .n { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; border-radius:50%; background:var(--teal); color:#fff; font-family:"Zen Maru Gothic",sans-serif; font-weight:900; margin-bottom:10px; }
+.flow .step b { display:block; font-size:14.5px; margin-bottom:5px; }
+.flow .step small { font-size:12.5px; color:var(--abyss-soft); line-height:1.7; }
+.chips { display:flex; flex-wrap:wrap; gap:10px; }
+.chip { background:var(--panel); border:1.5px solid var(--panel-line); border-radius:14px; padding:14px 18px; font-weight:700; font-size:14px; }
+.chip span { display:block; font-size:12px; color:var(--abyss-soft); font-weight:500; margin-top:3px; }
+.gate { background:var(--gold-bg); border:1.5px solid var(--gold-line); border-radius:24px; padding:28px; box-shadow:var(--shadow); }
+.gate h2 { color:var(--gold); }
+.gate ul { list-style:none; margin-top:14px; display:grid; gap:10px; }
+.gate li { font-size:14px; padding-left:26px; position:relative; }
+.gate li::before { content:"✓"; position:absolute; left:0; color:var(--gold); font-weight:900; }
+.eco { display:flex; flex-wrap:wrap; gap:10px; margin-top:8px; }
+.eco a { background:var(--foam); border:1.5px solid var(--panel-line); border-radius:999px; padding:9px 16px; font-size:13px; font-weight:800; color:var(--teal-deep); }
+.eco a:hover { border-color:var(--teal); }
+footer.site { text-align:center; color:var(--abyss-soft); font-size:12.5px; padding:44px 20px 54px; border-top:1px solid var(--panel-line); margin-top:24px; }
+footer.site a { font-weight:700; }
+@media (max-width:760px){ .hero{ grid-template-columns:1fr; } .hero-card{ order:-1; } }
+</style>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-BP0650KDFR"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-BP0650KDFR');
+</script>
+<script>
+(function () {
+    var s = document.createElement('script');
+    s.src = 'https://aiknowledgecms.exbridge.jp/simpletrack.php'
+        + '?url=' + encodeURIComponent(location.href)
+        + '&ref=' + encodeURIComponent(document.referrer);
+    document.head.appendChild(s);
+})();
+</script>
+</head>
+<body>
+
+<header class="site"><div class="wrap">
+  <div class="hbrand">
+    <div class="ico"><img src="assets/kurage_avatar.webp" alt="Kurage"></div>
+    <div><strong>Kurage Montage</strong><span>株式会社エクスブリッジのプロダクト</span></div>
+  </div>
+  <nav class="hnav">
+    <a class="btn btn-ghost" href="index.html">English</a>
+    <a class="btn btn-ghost" href="https://kurage.exbridge.jp/kuragev.php" target="_blank" rel="noopener">動画を見る</a>
+    <a class="btn btn-primary" href="https://kurage.exbridge.jp/kmontage.php">動画を作る</a>
+  </nav>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <span class="eyebrow"><span class="dot"></span>AI VTuber ・ 解説ショート動画</span>
+      <h1>URLを1つ渡すだけ。<em>Kurageさんが解説ショート動画にします。</em></h1>
+      <p class="lead">
+        <b>Kurage Montage</b> に、<b>X投稿・YouTube・ブログ/記事・PDF</b> のURLを渡すと、
+        エクスブリッジのAI VTuber・<b>Kurageさん</b>がその内容を読み解き、シーンを構成し、台本を書いて、
+        <b>日本語の解説ショート動画</b>にナレーションまで付けて仕上げます。編集も台本書きも不要です。
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://kurage.exbridge.jp/kmontage.php">動画を作る</a>
+        <a class="btn btn-ghost" href="https://kurage.exbridge.jp/kuragev.php" target="_blank" rel="noopener">動画を見る</a>
+        <a class="btn btn-ghost" href="https://github.com/katsushi2441/kmontage" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+    <div class="hero-card">
+      <img src="assets/kurage_avatar.png" alt="Kurage — クラゲのAI VTuber">
+      <h2>Kurageさん</h2>
+      <p>エクスブリッジのクラゲAI VTuber。読み解いて、台本を書いて、話します。</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>仕組み</h2>
+    <p class="sub">リンク1つから、完成したショート動画まで — 5ステップ。</p>
+    <div class="flow">
+      <div class="step"><span class="n">1</span><b>URLを渡す</b><small>X投稿・YouTube・ブログ/記事・PDF。</small></div>
+      <div class="step"><span class="n">2</span><b>抽出・文字起こし</b><small>動画は yt-dlp・fxtwitter・Kurage Voiceで文字起こし。記事/PDFは本文を直接抽出。</small></div>
+      <div class="step"><span class="n">3</span><b>シーン構成・台本</b><small>ローカルLLMが、元ネタだけを根拠に12シーンのショート台本を作成。</small></div>
+      <div class="step"><span class="n">4</span><b>Kurageさんが動画化</b><small>台本をVTuberモードのKurageさんへ渡して動画を生成。</small></div>
+      <div class="step"><span class="n">5</span><b>公開</b><small>完成した動画がKurageさんの動画ページに並びます。</small></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>URLがあれば、なんでも</h2>
+    <p class="sub">4種類の元ネタから、1本のショート動画に。</p>
+    <div class="chips">
+      <div class="chip">X投稿<span>リンク先のポスト</span></div>
+      <div class="chip">YouTube<span>字幕またはWhisper文字起こし</span></div>
+      <div class="chip">ブログ / 記事<span>本文を直接抽出</span></div>
+      <div class="chip">PDF<span>資料・レポート</span></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="gate">
+      <h2>“それっぽい動画”は作らない品質ゲート</h2>
+      <p class="sub" style="margin-bottom:0">kmontageは、質の低い動画を出すくらいなら止まります。</p>
+      <ul>
+        <li>台本は必ず<b>日本語・12シーン</b>のショート。英語や短すぎる台本は作り直し。</li>
+        <li><b>汎用的な埋め草を排除。</b>ぼんやりした一文や定型のタイトルは却下。</li>
+        <li>すべての主張は<b>元ネタに忠実</b>であること。不誠実な台本はゲートで落とす。</li>
+        <li>それでも忠実な台本にならなければ、ジョブは<b>停止</b>——動画は公開しません。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Kurageエコシステムの一員</h2>
+    <p class="sub">本番稼働しているAIプロダクト群。</p>
+    <div class="eco">
+      <a href="https://kfreqai.exbridge.jp/" target="_blank" rel="noopener">kfreqai — 暗号資産AI</a>
+      <a href="https://kfxai.exbridge.jp/" target="_blank" rel="noopener">kfxai — FX AI</a>
+      <a href="https://kcbrain.exbridge.jp/" target="_blank" rel="noopener">kcbrain — 暗号ジャッジAPI</a>
+      <a href="https://kfxbrain.exbridge.jp/" target="_blank" rel="noopener">kfxbrain — FXジャッジAPI</a>
+      <a href="https://url2ai.exbridge.jp/" target="_blank" rel="noopener">url2ai — URLパブリッシャー</a>
+    </div>
+  </section>
+</main>
+
+<footer class="site"><div class="wrap">
+  Kurage Montage — <a href="https://exbridge.jp/">株式会社エクスブリッジ</a>のプロダクト ·
+  <a href="https://github.com/katsushi2441/kmontage" target="_blank" rel="noopener">GitHub</a> ·
+  <a href="index.html">English</a> ·
+  <a href="https://exbridge.jp/contact.php">お問い合わせ</a>
+  <br><br>&copy; <span id="y"></span> EXBRIDGE, Inc.
+</div></footer>
+<script>document.getElementById('y').textContent=new Date().getFullYear();</script>
+
+</body>
+</html>
