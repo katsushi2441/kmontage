@@ -1,0 +1,50 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+.stage{position:relative;width:1200px;height:630px;overflow:hidden;font-family:"Noto Sans CJK JP",sans-serif;color:#f5ecfa;
+ background:radial-gradient(860px 520px at 90% -10%,rgba(227,91,216,.22),transparent 60%),
+ radial-gradient(700px 560px at -8% 110%,rgba(124,77,255,.20),transparent 55%),
+ linear-gradient(135deg,#170f2e 0%,#241543 55%,#3a1140 100%)}
+.left{position:absolute;left:66px;top:52px;width:660px}
+.eyebrow{display:inline-flex;align-items:center;gap:11px;font-size:21px;font-weight:800;letter-spacing:.12em;color:#f2a6ec;text-transform:uppercase}
+.dot{width:12px;height:12px;border-radius:50%;background:#e35bd8;box-shadow:0 0 16px #e35bd8}
+h1{font-size:82px;line-height:1.02;font-weight:900;letter-spacing:-.02em;margin:12px 0 0}
+h1 .m{background:linear-gradient(90deg,#f2a6ec,#8e7bff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{font-size:29px;font-weight:700;color:#dcCbe8;color:#dccbe8;margin-top:20px;line-height:1.5}
+.chips{display:flex;gap:12px;margin-top:26px;flex-wrap:wrap}
+.chip{background:rgba(255,255,255,.07);border:1.5px solid rgba(242,166,236,.35);border-radius:15px;padding:11px 17px;font-size:21px;font-weight:800}
+.chip b{color:#f2a6ec}
+.foot{position:absolute;left:66px;bottom:42px;display:flex;align-items:center;gap:14px;font-size:26px;color:#c3aed2}
+.foot .url{font-weight:800;color:#f5ecfa}.jelly{font-size:38px}
+.right{position:absolute;right:58px;top:0;bottom:0;width:380px;display:flex;flex-direction:column;justify-content:center;gap:18px;align-items:center}
+.urlchip{background:rgba(255,255,255,.08);border:1.5px solid rgba(242,166,236,.4);border-radius:16px;padding:14px 20px;font-size:22px;font-weight:800;color:#f0dff5}
+.arrow{font-size:38px;color:#f2a6ec;line-height:1}
+.film{background:#0d0a1c;border:2px solid rgba(242,166,236,.5);border-radius:16px;padding:12px 10px;display:flex;gap:8px;box-shadow:0 16px 46px rgba(0,0,0,.45)}
+.fr{width:74px;height:118px;border-radius:8px;position:relative;overflow:hidden;background:linear-gradient(160deg,#3d2a6b,#6b2a5e)}
+.fr:nth-child(2){background:linear-gradient(160deg,#31356e,#5e2a6b)}
+.fr:nth-child(3){background:linear-gradient(160deg,#2a5e6b,#3d2a6b)}
+.fr:after{content:"";position:absolute;left:8px;right:8px;bottom:8px;height:16px;border-radius:4px;background:rgba(255,255,255,.85)}
+.play{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.92);display:flex;align-items:center;justify-content:center;color:#3a1140;font-size:15px;font-weight:900}
+.badge{background:rgba(142,123,255,.16);border:1.5px solid rgba(142,123,255,.5);color:#cfc4ff;border-radius:999px;padding:8px 18px;font-size:19px;font-weight:900}
+</style></head><body><div class="stage">
+<div class="left">
+ <span class="eyebrow"><span class="dot"></span>URL → SHORT VIDEO ・ 日本語品質ゲート</span>
+ <h1>Kurage <span class="m">Montage</span></h1>
+ <div class="sub">X・YouTube・記事・PDFのURLを渡すと、<br>Kurageが日本語ショート解説動画に。</div>
+ <div class="chips">
+  <div class="chip">🎬 シーン設計を<b>自動生成</b></div>
+  <div class="chip">🗣️ Kurageが<b>VTuber解説</b></div>
+  <div class="chip">🚧 低品質台本は<b>止める</b></div>
+ </div>
+</div>
+<div class="foot"><span class="jelly">🪼</span><span class="url">kmontage.exbridge.jp</span></div>
+<div class="right">
+ <div class="urlchip">🔗 https://…の記事/動画URL</div>
+ <div class="arrow">↓</div>
+ <div class="film">
+   <div class="fr"><div class="play">▶</div></div>
+   <div class="fr"></div>
+   <div class="fr"></div>
+ </div>
+ <div class="badge">約2分の日本語ショート動画</div>
+</div>
+</div></body></html>
