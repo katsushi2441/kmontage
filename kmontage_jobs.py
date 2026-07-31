@@ -32,6 +32,7 @@ def ollama_generate_job(
         "model": model,
         "prompt": prompt,
         "stream": False,
+        "think": False,
         "options": {
             "temperature": float(temperature),
             "num_predict": int(num_predict),

@@ -32,6 +32,7 @@ OLLAMA_NUM_PREDICT = int(os.environ.get("KMONTAGE_OLLAMA_NUM_PREDICT", "8192"))
 USE_RQDB4AI_OLLAMA = os.environ.get("KMONTAGE_USE_RQDB4AI_OLLAMA", "1").lower() not in {"0", "false", "no"}
 RQDB4AI_OLLAMA_QUEUE_CLASS = os.environ.get("KMONTAGE_RQDB4AI_OLLAMA_QUEUE_CLASS", "web")
 RQDB4AI_OLLAMA_TIMEOUT = int(os.environ.get("KMONTAGE_RQDB4AI_OLLAMA_TIMEOUT", "900"))
+KURAGE_WAIT_TIMEOUT = int(os.environ.get("KMONTAGE_KURAGE_WAIT_TIMEOUT", "14400"))
 YTDLP_BIN = os.environ.get("YTDLP_BIN", "yt-dlp")
 YTDLP_COOKIES_FILE = os.environ.get("KMONTAGE_YTDLP_COOKIES_FILE", "")
 YTDLP_COOKIES_BROWSER = os.environ.get("KMONTAGE_YTDLP_COOKIES_BROWSER", "")
@@ -77,6 +78,22 @@ def mark_interrupted_jobs_on_startup() -> None:
             continue
         status = str(data.get("status") or "").lower()
         if status not in ACTIVE_JOB_STATUSES:
+            continue
+        if data.get("kurage_job_id"):
+            data.update({
+                "status": "generating",
+                "error": None,
+                "monitoring_deferred_at": restarted_at,
+                "updated_at": restarted_at,
+            })
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            print(
+                f"[{path.stem}] preserved Kurage render after kmontage restart; "
+                "status will be reconciled from Kurage",
+                flush=True,
+            )
             continue
         reason = (
             f"Kurage Montage API restarted while job was {status}; "
@@ -205,6 +222,11 @@ def find_latest_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
             continue
         if normalize_source_url(str(job.get("url") or "")) != normalized:
             continue
+        if job.get("kurage_job_id") and job.get("status") != "done":
+            try:
+                job = refresh_from_kurage(job)
+            except Exception:
+                pass
         matches.append(normalize_job_progress(job))
     if not matches:
         return None
@@ -923,6 +945,7 @@ def ollama_generate(prompt: str, job_dir: Path, label: str, *, temperature: floa
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "think": False,
         "options": {"temperature": temperature, "num_predict": num_predict or OLLAMA_NUM_PREDICT},
     }
     try:
@@ -2051,6 +2074,7 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
             "failed_at_progress": None,
             "interrupted_status": None,
             "interrupted_at": None,
+            "monitoring_deferred_at": None,
         })
         try:
             report = {
@@ -2185,13 +2209,19 @@ def process_job(job_id: str) -> None:
         )
         save_job(job_id, kurage_job_id=kurage_job_id, status="generating", progress=60)
 
-        deadline = time.time() + 3600
+        deadline = time.time() + KURAGE_WAIT_TIMEOUT
         while time.time() < deadline:
             latest = refresh_from_kurage(load_job(job_id) or {"id": job_id})
             if latest.get("status") in {"done", "error"}:
                 return
             time.sleep(15)
-        raise RuntimeError("Kurage video generation timed out")
+        save_job(
+            job_id,
+            status="generating",
+            error=None,
+            monitoring_deferred_at=now(),
+        )
+        return
     except Exception as exc:
         current = load_job(job_id) or {}
         failed_progress = int(current.get("progress") or 0)
@@ -2334,7 +2364,7 @@ def list_jobs(limit: int = 20, mode: str = ""):
             if mode and str(job.get("mode") or "summary") != mode:
                 continue
             job = normalize_job_progress(job)
-            if job.get("kurage_job_id") and job.get("status") not in {"done", "error"}:
+            if job.get("kurage_job_id") and job.get("status") != "done":
                 job = refresh_from_kurage(job)
             job = normalize_job_progress(job)
             job["_sort_timestamp"] = job_sort_timestamp(job, p.stat().st_mtime)

@@ -38,6 +38,14 @@ requests from directly grabbing a busy local Ollama process and keeps heavy LLM
 work serialized with other Kurage jobs.
 5. The resulting video appears in `kuragev.php` because Kurage owns the final job JSON/video.
 
+Kurage rendering can exceed one hour when ERNIE image generation is using safe
+CPU offload. kmontage waits up to four hours by default
+(`KMONTAGE_KURAGE_WAIT_TIMEOUT=14400`) and, if that local wait expires, leaves
+the job in `generating` instead of recording a false timeout error. Job list and
+detail requests reconcile unfinished or previously errored entries against the
+authoritative Kurage status. A kmontage API restart also preserves renders that
+already have a Kurage job ID.
+
 `/generate_from_news` is intentionally not used for kmontage reference-video jobs.
 It can rewrite the source into a generic news explainer and dilute concrete
 numbers, tools, workflow steps, and risks from the original video. kmontage must
