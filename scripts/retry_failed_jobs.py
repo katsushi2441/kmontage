@@ -26,6 +26,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--max-load-1m", type=float, default=4.0)
     value.add_argument("--max-load-5m", type=float, default=6.0)
     value.add_argument("--max-gpu-utilization", type=float, default=50.0)
+    value.add_argument("--max-gpu-memory-mb", type=float, default=8000.0)
     value.add_argument("--min-available-memory-gb", type=float, default=12.0)
     value.add_argument("--capacity-poll-seconds", type=int, default=30)
     value.add_argument("--inter-job-cooldown", type=int, default=60)
@@ -40,25 +41,35 @@ def available_memory_gb(meminfo: Path = Path("/proc/meminfo")) -> float:
     return 0.0
 
 
-def gpu_utilization_percent() -> float:
+def gpu_pressure() -> tuple[float, float]:
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
             text=True,
             capture_output=True,
             timeout=10,
             check=True,
         )
-        return max(float(line.strip()) for line in result.stdout.splitlines() if line.strip())
+        readings = [
+            tuple(float(value.strip()) for value in line.split(","))
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+        return max(value[0] for value in readings), max(value[1] for value in readings)
     except (OSError, ValueError, subprocess.SubprocessError):
         # Hosts without NVIDIA monitoring should still use the CPU/memory gates.
-        return 0.0
+        return 0.0, 0.0
 
 
 def wait_for_capacity(
     max_load_1m: float,
     max_load_5m: float,
     max_gpu: float,
+    max_gpu_memory_mb: float,
     min_memory_gb: float,
     poll_seconds: int,
 ) -> None:
@@ -66,17 +77,24 @@ def wait_for_capacity(
     while True:
         load_1m, load_5m, _ = os.getloadavg()
         memory_gb = available_memory_gb()
-        gpu = gpu_utilization_percent()
-        if load_1m <= max_load_1m and load_5m <= max_load_5m and gpu <= max_gpu and memory_gb >= min_memory_gb:
+        gpu, gpu_memory_mb = gpu_pressure()
+        if (
+            load_1m <= max_load_1m
+            and load_5m <= max_load_5m
+            and gpu <= max_gpu
+            and gpu_memory_mb <= max_gpu_memory_mb
+            and memory_gb >= min_memory_gb
+        ):
             print(
                 f"[capacity] ready: load1={load_1m:.2f} load5={load_5m:.2f} "
-                f"gpu={gpu:.0f}% mem_available={memory_gb:.1f}GiB",
+                f"gpu={gpu:.0f}% vram={gpu_memory_mb:.0f}MiB mem_available={memory_gb:.1f}GiB",
                 flush=True,
             )
             return
         print(
             f"[capacity] waiting: load1={load_1m:.2f}/{max_load_1m:.2f} "
             f"load5={load_5m:.2f}/{max_load_5m:.2f} gpu={gpu:.0f}/{max_gpu:.0f}% "
+            f"vram={gpu_memory_mb:.0f}/{max_gpu_memory_mb:.0f}MiB "
             f"mem_available={memory_gb:.1f}/{min_memory_gb:.1f}GiB",
             flush=True,
         )
@@ -152,6 +170,7 @@ def main() -> int:
             args.max_load_1m,
             args.max_load_5m,
             args.max_gpu_utilization,
+            args.max_gpu_memory_mb,
             args.min_available_memory_gb,
             args.capacity_poll_seconds,
         )
