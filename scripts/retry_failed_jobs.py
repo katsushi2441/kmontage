@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -23,6 +24,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--poll-seconds", type=int, default=15)
     value.add_argument("--job-timeout", type=int, default=21600)
     value.add_argument("--max-load-1m", type=float, default=4.0)
+    value.add_argument("--max-load-5m", type=float, default=6.0)
+    value.add_argument("--max-gpu-utilization", type=float, default=50.0)
     value.add_argument("--min-available-memory-gb", type=float, default=12.0)
     value.add_argument("--capacity-poll-seconds", type=int, default=30)
     value.add_argument("--inter-job-cooldown", type=int, default=60)
@@ -37,16 +40,43 @@ def available_memory_gb(meminfo: Path = Path("/proc/meminfo")) -> float:
     return 0.0
 
 
-def wait_for_capacity(max_load: float, min_memory_gb: float, poll_seconds: int) -> None:
+def gpu_utilization_percent() -> float:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+        return max(float(line.strip()) for line in result.stdout.splitlines() if line.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Hosts without NVIDIA monitoring should still use the CPU/memory gates.
+        return 0.0
+
+
+def wait_for_capacity(
+    max_load_1m: float,
+    max_load_5m: float,
+    max_gpu: float,
+    min_memory_gb: float,
+    poll_seconds: int,
+) -> None:
     """Do not begin another expensive job while the shared host is busy."""
     while True:
-        load_1m = os.getloadavg()[0]
+        load_1m, load_5m, _ = os.getloadavg()
         memory_gb = available_memory_gb()
-        if load_1m <= max_load and memory_gb >= min_memory_gb:
-            print(f"[capacity] ready: load1={load_1m:.2f} mem_available={memory_gb:.1f}GiB", flush=True)
+        gpu = gpu_utilization_percent()
+        if load_1m <= max_load_1m and load_5m <= max_load_5m and gpu <= max_gpu and memory_gb >= min_memory_gb:
+            print(
+                f"[capacity] ready: load1={load_1m:.2f} load5={load_5m:.2f} "
+                f"gpu={gpu:.0f}% mem_available={memory_gb:.1f}GiB",
+                flush=True,
+            )
             return
         print(
-            f"[capacity] waiting: load1={load_1m:.2f}/{max_load:.2f} "
+            f"[capacity] waiting: load1={load_1m:.2f}/{max_load_1m:.2f} "
+            f"load5={load_5m:.2f}/{max_load_5m:.2f} gpu={gpu:.0f}/{max_gpu:.0f}% "
             f"mem_available={memory_gb:.1f}/{min_memory_gb:.1f}GiB",
             flush=True,
         )
@@ -118,7 +148,13 @@ def main() -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
 
     for index, job in enumerate(jobs, 1):
-        wait_for_capacity(args.max_load_1m, args.min_available_memory_gb, args.capacity_poll_seconds)
+        wait_for_capacity(
+            args.max_load_1m,
+            args.max_load_5m,
+            args.max_gpu_utilization,
+            args.min_available_memory_gb,
+            args.capacity_poll_seconds,
+        )
         job_id = str(job["id"])
         print(f"[{index}/{len(jobs)}] retrying {job_id}: {job.get('title') or job.get('url')}", flush=True)
         result = {"job_id": job_id, "title": job.get("title"), "started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
