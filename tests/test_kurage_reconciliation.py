@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -76,6 +77,59 @@ class KurageReconciliationTests(unittest.TestCase):
         interrupted = main.load_job("planning") or {}
         self.assertEqual(interrupted["status"], "error")
         self.assertIn("worker thread was interrupted", interrupted["error"])
+
+    @patch("backend.main.requests.get")
+    def test_unchanged_kurage_error_does_not_touch_updated_at(self, get: Mock) -> None:
+        self.write_job(
+            "failed",
+            status="error",
+            error="ERNIE image generation failed",
+            progress=66,
+            failed_at_progress=66,
+            updated_at="2026-07-01 00:00:00",
+            kurage_job_id="kurage-failed",
+            kurage_status="error",
+            kurage_progress=33,
+            kurage_title="failed video",
+            kurage_script=None,
+        )
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "status": "error",
+            "progress": 33,
+            "title": "failed video",
+            "script": None,
+            "error": "ERNIE image generation failed",
+        }
+        get.return_value = response
+
+        refreshed = main.refresh_from_kurage(main.load_job("failed") or {})
+
+        self.assertEqual(refreshed["updated_at"], "2026-07-01 00:00:00")
+
+    @patch("backend.main.requests.get")
+    def test_job_list_does_not_poll_terminal_infrastructure_errors(self, get: Mock) -> None:
+        self.write_job(
+            "failed",
+            status="error",
+            error="Voicebox TTS failed",
+            kurage_job_id="kurage-failed",
+        )
+
+        response = main.list_jobs(limit=20)
+
+        self.assertEqual(response["jobs"][0]["status"], "error")
+        get.assert_not_called()
+
+    def test_concurrent_job_updates_keep_every_field(self) -> None:
+        self.write_job("concurrent", status="generating")
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(lambda index: main.save_job("concurrent", **{f"field_{index}": index}), range(20)))
+
+        saved = main.load_job("concurrent") or {}
+        for index in range(20):
+            self.assertEqual(saved[f"field_{index}"], index)
 
 
 if __name__ == "__main__":

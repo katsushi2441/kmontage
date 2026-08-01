@@ -49,6 +49,7 @@ app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 CREATE_JOB_LOCK = threading.Lock()
+JOB_FILE_LOCK = threading.RLock()
 ACTIVE_JOB_STATUSES = {
     "queued",
     "analyzing",
@@ -58,6 +59,17 @@ ACTIVE_JOB_STATUSES = {
     "planning",
     "generating",
 }
+
+
+def atomic_write_job_file(path: Path, data: dict[str, Any]) -> None:
+    """Atomically replace one job JSON without sharing a fixed temp filename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def mark_interrupted_jobs_on_startup() -> None:
@@ -86,9 +98,8 @@ def mark_interrupted_jobs_on_startup() -> None:
                 "monitoring_deferred_at": restarted_at,
                 "updated_at": restarted_at,
             })
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(path)
+            with JOB_FILE_LOCK:
+                atomic_write_job_file(path, data)
             print(
                 f"[{path.stem}] preserved Kurage render after kmontage restart; "
                 "status will be reconciled from Kurage",
@@ -107,9 +118,8 @@ def mark_interrupted_jobs_on_startup() -> None:
             "interrupted_at": restarted_at,
             "updated_at": restarted_at,
         })
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        with JOB_FILE_LOCK:
+            atomic_write_job_file(path, data)
         print(f"[{path.stem}] marked interrupted kmontage job as error: {reason}", flush=True)
         marked += 1
     if marked:
@@ -154,6 +164,22 @@ def normalize_source_url(url: str) -> str:
 
 def is_active_job(job: dict[str, Any]) -> bool:
     return str(job.get("status") or "").lower() in ACTIVE_JOB_STATUSES
+
+
+def should_reconcile_job_from_kurage(job: dict[str, Any]) -> bool:
+    """Refresh active jobs and legacy false-timeout errors, not every old failure."""
+    if not job.get("kurage_job_id"):
+        return False
+    if is_active_job(job):
+        return True
+    if str(job.get("status") or "").lower() != "error":
+        return False
+    error = str(job.get("error") or "").lower()
+    return bool(
+        job.get("monitoring_deferred_at")
+        or "kurage video generation timed out" in error
+        or "restarted while job was" in error
+    )
 
 
 def job_sort_timestamp(job: dict[str, Any], fallback: float = 0.0) -> float:
@@ -222,7 +248,7 @@ def find_latest_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
             continue
         if normalize_source_url(str(job.get("url") or "")) != normalized:
             continue
-        if job.get("kurage_job_id") and job.get("status") != "done":
+        if should_reconcile_job_from_kurage(job):
             try:
                 job = refresh_from_kurage(job)
             except Exception:
@@ -240,34 +266,33 @@ def job_path(job_id: str) -> Path:
 
 def load_job(job_id: str) -> dict[str, Any] | None:
     p = job_path(job_id)
-    if not p.exists():
-        return None
-    return normalize_job_progress(json.loads(p.read_text(encoding="utf-8")))
+    with JOB_FILE_LOCK:
+        if not p.exists():
+            return None
+        return normalize_job_progress(json.loads(p.read_text(encoding="utf-8")))
 
 
 def save_job(job_id: str, **kwargs: Any) -> dict[str, Any]:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     p = job_path(job_id)
-    data: dict[str, Any] = {}
-    if p.exists():
-        data = json.loads(p.read_text(encoding="utf-8"))
-    data.update(kwargs)
-    data["updated_at"] = now()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
-    return data
+    with JOB_FILE_LOCK:
+        data: dict[str, Any] = {}
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+        data.update(kwargs)
+        data["updated_at"] = now()
+        atomic_write_job_file(p, data)
+        return data
 
 
 def replace_job(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     p = job_path(job_id)
-    data = dict(data)
-    data["updated_at"] = now()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
-    return data
+    with JOB_FILE_LOCK:
+        data = dict(data)
+        data["updated_at"] = now()
+        atomic_write_job_file(p, data)
+        return data
 
 
 def run_cmd(args: list[str], *, cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess[str]:
@@ -2103,7 +2128,10 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
         })
     else:
         updates.update({"status": "generating", "progress": 55 + int(status.get("progress") or 0) // 3})
-    return save_job(job["id"], **updates)
+    changed_updates = {key: value for key, value in updates.items() if job.get(key) != value}
+    if not changed_updates:
+        return job
+    return save_job(job["id"], **changed_updates)
 
 
 def process_job(job_id: str) -> None:
@@ -2364,7 +2392,7 @@ def list_jobs(limit: int = 20, mode: str = ""):
             if mode and str(job.get("mode") or "summary") != mode:
                 continue
             job = normalize_job_progress(job)
-            if job.get("kurage_job_id") and job.get("status") != "done":
+            if should_reconcile_job_from_kurage(job):
                 job = refresh_from_kurage(job)
             job = normalize_job_progress(job)
             job["_sort_timestamp"] = job_sort_timestamp(job, p.stat().st_mtime)
