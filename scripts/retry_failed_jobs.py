@@ -26,7 +26,10 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--max-load-1m", type=float, default=4.0)
     value.add_argument("--max-load-5m", type=float, default=6.0)
     value.add_argument("--max-gpu-utilization", type=float, default=50.0)
-    value.add_argument("--max-gpu-memory-mb", type=float, default=8000.0)
+    # The normal shared baseline (Gemma + Audio8 + small APIs) is about 14.3GB.
+    # Sequential ERNIE offload adds roughly 1.2GB, so 16GB permits that safe
+    # combination while rejecting larger competing GPU workloads.
+    value.add_argument("--max-gpu-memory-mb", type=float, default=16000.0)
     value.add_argument("--min-available-memory-gb", type=float, default=12.0)
     value.add_argument("--capacity-poll-seconds", type=int, default=30)
     value.add_argument("--inter-job-cooldown", type=int, default=60)
