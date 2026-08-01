@@ -103,6 +103,11 @@ fxtwitter API から動画URLを取得し、Whisperは KurageVP と同じ CUDA/f
 `pdftotext` を優先し、Python PDFライブラリがある環境ではそれも利用します。X投稿は
 fxtwitter の本文・メディア情報を見て、動画付きなら従来の動画分析、動画なしなら記事/本文分析として扱います。
 
+Yahoo!ニュースの `/comments` URLは記事公開終了後に404となるため、記事本体のURLへ
+正規化して取得し、すでに失効している場合はWayback Machineの保存本文を復元します。
+保存本文が見つからない場合は、Yahoo!ニュースのトップページや無関係な検索結果で
+動画を作らずエラーとして停止します。
+
 ## Notes
 
 OpenMontage is AGPL-3.0 and is kept as a reference clone. Kurage Montage does not vendor OpenMontage code into the product path; it implements a Kurage-specific reference-video explainer workflow.

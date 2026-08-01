@@ -1,6 +1,11 @@
 import unittest
 
-from backend.main import extract_source_numbers, quality_source_numbers, script_quality_issues
+from backend.main import (
+    extract_source_numbers,
+    news_opinion_quality_issues,
+    quality_source_numbers,
+    script_quality_issues,
+)
 
 
 class SourceNumberQualityTests(unittest.TestCase):
@@ -55,6 +60,34 @@ class SourceNumberQualityTests(unittest.TestCase):
         issues = script_quality_issues(self.analysis, self.meta, self.transcript)
 
         self.assertFalse(any(issue.startswith("missing_source_numbers:") for issue in issues))
+
+    def test_web_reaction_framing_counts_as_reflected(self) -> None:
+        analysis = {
+            "script": {
+                "title": "皇室典範改正案とWeb上の反応",
+                "scenes": [
+                    {
+                        "narration": "Webやブログでは、皇族数の確保にとどまる点への指摘が紹介されています。",
+                        "image_prompt": "hero visual metaphor, bright white studio, negative space, no text",
+                    }
+                    for _ in range(12)
+                ],
+            },
+            "scene_plan": {"scenes": []},
+        }
+        opinions = {
+            "opinion_points": [
+                {
+                    "platform": "Web/Blog",
+                    "point": "皇位継承のあり方は対象外で、皇族数の確保策にとどまったとの指摘。",
+                }
+                for _ in range(4)
+            ]
+        }
+
+        issues = news_opinion_quality_issues(analysis, opinions)
+
+        self.assertNotIn("reactions_not_reflected", issues)
 
 
 if __name__ == "__main__":

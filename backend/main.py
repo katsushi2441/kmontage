@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -380,6 +381,17 @@ def jina_reader_url(url: str) -> str:
     return "https://r.jina.ai/" + url
 
 
+def yahoo_news_article_url(url: str) -> str:
+    """Return the canonical Yahoo News article URL, without /comments."""
+    parsed = urlparse(url)
+    if not parsed.netloc.lower().endswith("news.yahoo.co.jp"):
+        return ""
+    match = re.fullmatch(r"/articles/([0-9a-fA-F]{40})(?:/comments)?/?", parsed.path)
+    if not match:
+        return ""
+    return f"https://news.yahoo.co.jp/articles/{match.group(1).lower()}"
+
+
 def extract_vtt_text(vtt: str) -> str:
     lines = []
     seen = set()
@@ -529,6 +541,44 @@ def fetch_reference_metadata(url: str, kind: str, job_dir: Path) -> dict[str, An
         raise
 
 
+def parse_html_document(
+    html: str,
+    url: str,
+    *,
+    extractor: str = "html",
+    original_url: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg", "form", "nav", "footer", "header", "aside"]):
+        tag.decompose()
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+    og_title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"})
+    if og_title and og_title.get("content"):
+        title = str(og_title.get("content")).strip()
+    description = ""
+    desc_tag = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", property="og:description")
+    if desc_tag and desc_tag.get("content"):
+        description = str(desc_tag.get("content")).strip()
+    article = soup.find("article") or soup.find("main") or soup.body or soup
+    headings = " ".join(h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2"])[:8])
+    paragraphs = [p.get_text(" ", strip=True) for p in article.find_all(["p", "li", "blockquote"])]
+    text = clean_extracted_text("\n".join([title, description, headings, *paragraphs]))
+    meta = {
+        "id": Path(urlparse(url).path).name or "article",
+        "webpage_url": url,
+        "original_url": original_url or url,
+        "extractor": extractor,
+        "title": title or url,
+        "description": description,
+        "uploader": urlparse(url).netloc,
+        "channel": urlparse(url).netloc,
+        "duration": 0,
+    }
+    return meta, text
+
+
 def html_metadata_and_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
     headers = {"User-Agent": "Mozilla/5.0 KurageMontage/1.0"}
     res = requests.get(url, headers=headers, timeout=40)
@@ -549,35 +599,70 @@ def html_metadata_and_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str
             "duration": 0,
         }
         return meta, extract_pdf_text(pdf_path, job_dir)
+    return parse_html_document(res.text, url)
 
-    soup = BeautifulSoup(res.text, "html.parser")
-    for tag in soup(["script", "style", "noscript", "svg", "form", "nav", "footer", "header", "aside"]):
-        tag.decompose()
-    title = ""
-    if soup.title and soup.title.string:
-        title = soup.title.string.strip()
-    og_title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "twitter:title"})
-    if og_title and og_title.get("content"):
-        title = str(og_title.get("content")).strip()
-    description = ""
-    desc_tag = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", property="og:description")
-    if desc_tag and desc_tag.get("content"):
-        description = str(desc_tag.get("content")).strip()
-    article = soup.find("article") or soup.find("main") or soup.body or soup
-    headings = " ".join(h.get_text(" ", strip=True) for h in soup.find_all(["h1", "h2"])[:8])
-    paragraphs = [p.get_text(" ", strip=True) for p in article.find_all(["p", "li", "blockquote"])]
-    text = clean_extracted_text("\n".join([title, description, headings, *paragraphs]))
-    meta = {
-        "id": Path(urlparse(url).path).name or "article",
-        "webpage_url": url,
+
+def fetch_yahoo_news_document(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    """Fetch an active Yahoo article or recover an expired one from Wayback.
+
+    Yahoo's /comments URLs disappear with the article. Jina then returns the
+    generic Yahoo News home page, which previously caused unrelated reaction
+    searches. Always resolve the canonical article first and only accept a
+    snapshot whose article title and body are concrete.
+    """
+    canonical_url = yahoo_news_article_url(url)
+    if not canonical_url:
+        raise RuntimeError("Yahooニュースの記事URLを解析できませんでした。")
+
+    try:
+        meta, text = html_metadata_and_text(canonical_url, job_dir)
+        if str(meta.get("title") or "").strip() not in {"", "Yahoo!ニュース"} and len(text) >= 300:
+            meta["original_url"] = url
+            return meta, text
+    except Exception as exc:
+        (job_dir / "yahoo_live_fetch_warning.log").write_text(str(exc), encoding="utf-8")
+
+    availability = requests.get(
+        "https://archive.org/wayback/available",
+        params={"url": canonical_url},
+        timeout=30,
+    )
+    availability.raise_for_status()
+    available_data = availability.json()
+    closest = ((available_data.get("archived_snapshots") or {}).get("closest") or {})
+    timestamp = str(closest.get("timestamp") or "")
+    if not closest.get("available") or str(closest.get("status") or "") != "200" or not re.fullmatch(r"\d{14}", timestamp):
+        raise RuntimeError("失効したYahooニュース記事の保存済み本文が見つかりませんでした。")
+
+    snapshot_url = f"https://web.archive.org/web/{timestamp}id_/{canonical_url}"
+    snapshot = requests.get(
+        snapshot_url,
+        headers={"User-Agent": "Mozilla/5.0 KurageMontage/1.0"},
+        timeout=90,
+    )
+    snapshot.raise_for_status()
+    body = snapshot.content
+    if body.startswith(b"\x1f\x8b"):
+        body = gzip.decompress(body)
+    html = body.decode(snapshot.encoding or "utf-8", errors="replace")
+    (job_dir / "wayback_snapshot.html").write_text(html, encoding="utf-8")
+    (job_dir / "wayback_source.json").write_text(json.dumps({
         "original_url": url,
-        "extractor": "html",
-        "title": title or url,
-        "description": description,
-        "uploader": urlparse(url).netloc,
-        "channel": urlparse(url).netloc,
-        "duration": 0,
-    }
+        "canonical_url": canonical_url,
+        "snapshot_url": snapshot_url,
+        "timestamp": timestamp,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    meta, text = parse_html_document(
+        html,
+        canonical_url,
+        extractor="wayback_yahoo_news",
+        original_url=url,
+    )
+    title = str(meta.get("title") or "").strip()
+    if title in {"", "Yahoo!ニュース"} or len(text) < 300:
+        raise RuntimeError("Yahooニュースの保存ページから記事本文を復元できませんでした。")
+    meta["archive_timestamp"] = timestamp
+    meta["archive_snapshot_url"] = snapshot_url
     return meta, text
 
 
@@ -671,6 +756,12 @@ def fetch_x_article_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
 
 
 def fetch_document_source(url: str, kind: str, job_dir: Path) -> tuple[dict[str, Any], str]:
+    if kind == "article" and yahoo_news_article_url(url):
+        try:
+            return fetch_yahoo_news_document(url, job_dir)
+        except Exception as exc:
+            (job_dir / "document_fetch_warning.log").write_text(str(exc), encoding="utf-8")
+            raise
     try:
         if kind == "pdf":
             return fetch_pdf_document(url, job_dir)
@@ -1251,6 +1342,18 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
         p for p in points
         if isinstance(p, dict) and str(p.get("platform") or "") == "Xリプライ"
     ]
+    web_points = [
+        p for p in points
+        if isinstance(p, dict) and str(p.get("platform") or "") in {"Web/Blog", "Web", "ブログ"}
+    ]
+    youtube_points = [
+        p for p in points
+        if isinstance(p, dict) and str(p.get("platform") or "") == "YouTube"
+    ]
+    x_search_points = [
+        p for p in points
+        if isinstance(p, dict) and str(p.get("platform") or "") == "X"
+    ]
     source_text = "\n".join(str(p.get("point") or "") for p in points)
     source_terms = extract_source_terms(source_text)[:16]
     reaction_scene_count = 0
@@ -1314,7 +1417,17 @@ def news_opinion_quality_issues(analysis: dict[str, Any], opinions: dict[str, An
                 used += 1
         yahoo_reactions_reflected = bool(yahoo_points) and any(word in joined for word in ["Yahoo", "コメント", "共感"])
         x_reactions_reflected = bool(x_reply_points) and any(word in joined for word in ["Xリプライ", "リプライ", "いいね", "反応"])
-        if used < 1 and not yahoo_reactions_reflected and not x_reactions_reflected and len(clean_extracted_text(source_text)) >= 300:
+        web_reactions_reflected = bool(web_points) and any(word in joined for word in ["Web", "ブログ", "報道", "記事"])
+        youtube_reactions_reflected = bool(youtube_points) and "YouTube" in joined
+        x_search_reactions_reflected = bool(x_search_points) and any(word in joined for word in ["Xでは", "Xの反応", "X上"])
+        source_is_explicit = any([
+            yahoo_reactions_reflected,
+            x_reactions_reflected,
+            web_reactions_reflected,
+            youtube_reactions_reflected,
+            x_search_reactions_reflected,
+        ])
+        if used < 1 and not source_is_explicit and len(clean_extracted_text(source_text)) >= 300:
             issues.append("reactions_not_reflected")
     return issues
 
