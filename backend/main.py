@@ -137,12 +137,24 @@ class CreateJobRequest(BaseModel):
     vtuber_mode: bool = True
     video_style: str = "ai_avatar_explainer"
     mode: str = "summary"
+    image_provider: str = "codex_subscription"
     # テロップ編集者: normal=決定的ヒューリスティック / llm=claude→gemma4 fail-open
     editor_mode: str = "normal"
 
 
 def normalize_editor_mode(value: str) -> str:
     return "llm" if str(value or "").strip().lower() == "llm" else "normal"
+
+
+def normalize_image_provider(value: str | None) -> str:
+    provider = str(value or "codex_subscription").strip().lower().replace("-", "_")
+    aliases = {
+        "codex": "codex_subscription",
+        "chatgpt": "codex_subscription",
+        "chatgpt_subscription": "codex_subscription",
+    }
+    provider = aliases.get(provider, provider)
+    return provider if provider in {"codex_subscription", "ernie"} else "codex_subscription"
 
 
 def now() -> str:
@@ -208,7 +220,7 @@ def normalize_job_progress(job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
-def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
+def find_active_job_for_url(url: str, mode: str, image_provider: str = "codex_subscription") -> dict[str, Any] | None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     normalized = normalize_source_url(url)
     matches: list[dict[str, Any]] = []
@@ -218,6 +230,8 @@ def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
         except Exception:
             continue
         if str(job.get("mode") or "summary") != mode:
+            continue
+        if normalize_image_provider(job.get("image_provider") or "ernie") != normalize_image_provider(image_provider):
             continue
         if not is_active_job(job):
             continue
@@ -236,7 +250,7 @@ def find_active_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
     return matches[0]
 
 
-def find_latest_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
+def find_latest_job_for_url(url: str, mode: str, image_provider: str = "codex_subscription") -> dict[str, Any] | None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     normalized = normalize_source_url(url)
     matches: list[dict[str, Any]] = []
@@ -246,6 +260,8 @@ def find_latest_job_for_url(url: str, mode: str) -> dict[str, Any] | None:
         except Exception:
             continue
         if str(job.get("mode") or "summary") != mode:
+            continue
+        if normalize_image_provider(job.get("image_provider") or "ernie") != normalize_image_provider(image_provider):
             continue
         if normalize_source_url(str(job.get("url") or "")) != normalized:
             continue
@@ -2151,6 +2167,7 @@ def enqueue_kurage(
     analysis: dict[str, Any],
     vtuber_mode: bool,
     video_style: str,
+    image_provider: str,
     *,
     source: str = "kmontage",
     source_name: str = "Kurage Montage",
@@ -2171,6 +2188,7 @@ def enqueue_kurage(
         "source": source,
         "vtuber_mode": vtuber_mode,
         "video_style": video_style,
+        "image_provider": normalize_image_provider(image_provider),
         "editor_mode": editor_mode,
     }
     res = requests.post(f"{KURAGE_API}/generate_from_script", json=payload, timeout=60)
@@ -2202,6 +2220,10 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
         "kurage_title": status.get("title"),
         "kurage_script": status.get("script"),
     }
+    if status.get("image_provider") is not None or job.get("image_provider") is not None:
+        updates["image_provider"] = status.get("image_provider") or job.get("image_provider") or "ernie"
+        updates["image_provider_actual"] = status.get("image_provider_actual")
+        updates["image_provider_fallbacks"] = status.get("image_provider_fallbacks") or 0
     if status.get("status") == "done":
         updates.update({
             "status": "done",
@@ -2343,6 +2365,7 @@ def process_job(job_id: str) -> None:
             analysis,
             bool(job.get("vtuber_mode", True)),
             str(job.get("video_style") or default_style),
+            normalize_image_provider(job.get("image_provider")),
             source=source,
             source_name=source_name,
             overwrite_kurage_job_id=str(job.get("overwrite_kurage_job_id") or ""),
@@ -2407,6 +2430,9 @@ def health():
         "ollama_url": OLLAMA_URL,
         "ollama_model": OLLAMA_MODEL,
         "modes": ["summary", "news_opinions"],
+        "image_providers": ["codex_subscription", "ernie"],
+        "default_image_provider": "codex_subscription",
+        "image_provider_fallback": "ernie",
         "kagentreach_news_opinion_script": str(KAGENTREACH_NEWS_OPINION_SCRIPT),
     }
 
@@ -2422,8 +2448,9 @@ def create_job(req: CreateJobRequest):
     mode = req.mode.strip() or "summary"
     if mode not in {"summary", "news_opinions"}:
         raise HTTPException(status_code=400, detail="unsupported mode")
+    image_provider = normalize_image_provider(req.image_provider)
     with CREATE_JOB_LOCK:
-        active = find_active_job_for_url(url, mode)
+        active = find_active_job_for_url(url, mode, image_provider)
         if active:
             return {
                 "ok": True,
@@ -2433,7 +2460,7 @@ def create_job(req: CreateJobRequest):
                 "progress": active.get("progress", 0),
                 "message": "同じURLの生成がすでに進行中です。既存の生成状況を表示します。",
             }
-        existing = find_latest_job_for_url(url, mode)
+        existing = find_latest_job_for_url(url, mode, image_provider)
         if existing:
             return {
                 "ok": True,
@@ -2444,7 +2471,7 @@ def create_job(req: CreateJobRequest):
                 "message": "同じURLの生成済みジョブがあります。新規作成せず既存の生成状況を表示します。",
             }
         job_id = uuid.uuid4().hex[:16]
-        save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, editor_mode=normalize_editor_mode(req.editor_mode), created_at=now())
+        save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, image_provider=image_provider, editor_mode=normalize_editor_mode(req.editor_mode), created_at=now())
         thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
         thread.start()
         return {"ok": True, "job_id": job_id, "duplicate": False}
@@ -2487,6 +2514,7 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
         "progress": 0,
         "vtuber_mode": req.vtuber_mode,
         "video_style": req.video_style,
+        "image_provider": normalize_image_provider(req.image_provider),
         "editor_mode": normalize_editor_mode(req.editor_mode),
         "created_at": current.get("created_at") or now(),
         "regenerated_at": now(),
@@ -2552,6 +2580,7 @@ def retry_existing_render(job_id: str):
                 analysis,
                 bool(current.get("vtuber_mode", True)),
                 str(current.get("video_style") or "ai_avatar_explainer"),
+                normalize_image_provider(current.get("image_provider") or "ernie"),
                 source=source,
                 source_name=source_name,
                 overwrite_kurage_job_id=kurage_job_id,

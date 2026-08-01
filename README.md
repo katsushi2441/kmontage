@@ -16,6 +16,18 @@ Kurage Montage (`kmontage`) turns a reference X, YouTube, blog/article, or PDF U
    `reference_analysis.json`, `scene_plan.json`, `script.json`, and `qa.json`.
 4. The completed script is sent to Kurage `/generate_from_script` with VTuber mode enabled.
 
+The job request also carries an `image_provider` choice:
+
+- `codex_subscription` (kmontage default): uses the official Codex CLI built-in
+  ImageGen with the local ChatGPT OAuth login, one image at a time.
+- `ernie`: uses the existing ERNIE-Image-Turbo endpoint.
+
+Codex image generation has a 10-minute per-image timeout. If authentication,
+quota, the hosted image tool, or the command fails, Kurage records the requested
+and actual provider for the scene and falls back to ERNIE. A process-wide
+cooldown prevents every remaining scene from retrying a known-unavailable Codex
+path during the same render period.
+
 Before enqueueing to Kurage, kmontage now applies a Japanese quality gate. If
 the generated title or narration remains English, or if the script has too few
 scenes, the backend asks Ollama to rebuild the analysis as a Japanese 12-scene

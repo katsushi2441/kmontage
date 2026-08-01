@@ -131,6 +131,53 @@ class KurageReconciliationTests(unittest.TestCase):
         for index in range(20):
             self.assertEqual(saved[f"field_{index}"], index)
 
+    def test_image_provider_normalization_and_request_default(self) -> None:
+        request = main.CreateJobRequest(url="https://example.com/article")
+
+        self.assertEqual(request.image_provider, "codex_subscription")
+        self.assertEqual(main.normalize_image_provider("chatgpt"), "codex_subscription")
+        self.assertEqual(main.normalize_image_provider("ernie"), "ernie")
+        self.assertEqual(main.normalize_image_provider("invalid"), "codex_subscription")
+
+    def test_duplicate_lookup_is_scoped_to_image_provider(self) -> None:
+        self.write_job(
+            "ernie-job",
+            url="https://example.com/article",
+            mode="summary",
+            status="done",
+            image_provider="ernie",
+            created_at="2026-08-02 01:00:00",
+        )
+
+        self.assertIsNotNone(
+            main.find_latest_job_for_url("https://example.com/article", "summary", "ernie")
+        )
+        self.assertIsNone(
+            main.find_latest_job_for_url(
+                "https://example.com/article", "summary", "codex_subscription"
+            )
+        )
+
+    @patch("backend.main.requests.post")
+    def test_enqueue_kurage_forwards_image_provider(self, post: Mock) -> None:
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"job_id": "kurage-provider"}
+        post.return_value = response
+
+        main.enqueue_kurage(
+            "kmontage-provider",
+            "https://example.com/article",
+            "article",
+            {"script": {"title": "Provider", "scenes": [{"index": 0}]}},
+            True,
+            "ai_avatar_explainer",
+            "codex_subscription",
+        )
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["image_provider"], "codex_subscription")
+
     @patch("backend.main.requests.post")
     @patch("backend.main.threading.Thread")
     @patch("backend.main.enqueue_kurage")
