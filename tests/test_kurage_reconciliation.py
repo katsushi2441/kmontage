@@ -131,11 +131,12 @@ class KurageReconciliationTests(unittest.TestCase):
         for index in range(20):
             self.assertEqual(saved[f"field_{index}"], index)
 
+    @patch("backend.main.requests.post")
     @patch("backend.main.threading.Thread")
     @patch("backend.main.enqueue_kurage")
     @patch("backend.main.requests.get")
     def test_retry_render_reuses_existing_kurage_script(
-        self, get: Mock, enqueue: Mock, thread: Mock
+        self, get: Mock, enqueue: Mock, thread: Mock, post: Mock
     ) -> None:
         self.write_job(
             "retry",
@@ -156,7 +157,8 @@ class KurageReconciliationTests(unittest.TestCase):
             "script": {"title": "Retry", "scenes": [{"index": 0, "narration": "本文"}]},
         }
         get.return_value = response
-        enqueue.return_value = "kurage-retry"
+        rerender = Mock(status_code=200)
+        post.return_value = rerender
 
         result = main.retry_existing_render("retry")
 
@@ -164,7 +166,11 @@ class KurageReconciliationTests(unittest.TestCase):
         saved = main.load_job("retry") or {}
         self.assertEqual(saved["status"], "generating")
         self.assertIsNone(saved["error"])
-        enqueue.assert_called_once()
+        self.assertEqual(result["retry_mode"], "existing_assets")
+        enqueue.assert_not_called()
+        post.assert_called_once_with(
+            "http://127.0.0.1:18303/rerender/kurage-retry", timeout=30
+        )
         thread.return_value.start.assert_called_once()
 
 

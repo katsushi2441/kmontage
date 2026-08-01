@@ -2415,8 +2415,6 @@ def retry_existing_render(job_id: str):
     mode = str(current.get("mode") or "summary")
     source = "kmontage_news" if mode == "news_opinions" else "kmontage"
     source_name = "Kurage Montage News" if mode == "news_opinions" else "Kurage Montage"
-    analysis = dict(current.get("analysis") or {})
-    analysis["script"] = script
     save_job(
         job_id,
         status="generating",
@@ -2427,24 +2425,41 @@ def retry_existing_render(job_id: str):
         retry_render_at=now(),
     )
     try:
-        resumed_id = enqueue_kurage(
-            job_id,
-            str(current.get("url") or ""),
-            str(current.get("kind") or "article"),
-            analysis,
-            bool(current.get("vtuber_mode", True)),
-            str(current.get("video_style") or "ai_avatar_explainer"),
-            source=source,
-            source_name=source_name,
-            overwrite_kurage_job_id=kurage_job_id,
-            editor_mode=normalize_editor_mode(str(current.get("editor_mode") or "normal")),
-        )
+        rerender_response = requests.post(f"{KURAGE_API}/rerender/{kurage_job_id}", timeout=30)
+        if rerender_response.status_code == 200:
+            resumed_id = kurage_job_id
+            retry_mode = "existing_assets"
+        elif rerender_response.status_code == 409:
+            analysis = dict(current.get("analysis") or {})
+            analysis["script"] = script
+            resumed_id = enqueue_kurage(
+                job_id,
+                str(current.get("url") or ""),
+                str(current.get("kind") or "article"),
+                analysis,
+                bool(current.get("vtuber_mode", True)),
+                str(current.get("video_style") or "ai_avatar_explainer"),
+                source=source,
+                source_name=source_name,
+                overwrite_kurage_job_id=kurage_job_id,
+                editor_mode=normalize_editor_mode(str(current.get("editor_mode") or "normal")),
+            )
+            retry_mode = "full_render"
+        else:
+            rerender_response.raise_for_status()
+            raise RuntimeError(f"unexpected Kurage rerender response: {rerender_response.text[:500]}")
     except Exception as exc:
         save_job(job_id, status="error", error=str(exc), failed_at_progress=55)
         raise HTTPException(status_code=502, detail=f"Kurage render retry failed: {exc}") from exc
     save_job(job_id, kurage_job_id=resumed_id, status="generating", progress=60)
     threading.Thread(target=monitor_kurage_job, args=(job_id,), daemon=True).start()
-    return {"ok": True, "job_id": job_id, "kurage_job_id": resumed_id, "regenerated": True}
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "kurage_job_id": resumed_id,
+        "regenerated": True,
+        "retry_mode": retry_mode,
+    }
 
 
 @app.get("/api/jobs/{job_id}")
