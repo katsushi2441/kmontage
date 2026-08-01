@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hmac
 import json
 import os
 import re
@@ -18,8 +19,9 @@ from urllib.parse import urlunparse
 
 import requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,9 +47,25 @@ KAGENTREACH_ROOT = Path(os.environ.get("KAGENTREACH_ROOT", "/home/kojima/work/ka
 KAGENTREACH_NEWS_OPINION_SCRIPT = Path(
     os.environ.get("KAGENTREACH_NEWS_OPINION_SCRIPT", str(KAGENTREACH_ROOT / "scripts" / "news-opinion-research.py"))
 )
+KMONTAGE_INTERNAL_TOKEN = os.environ.get("KMONTAGE_INTERNAL_TOKEN", "").strip()
+KMONTAGE_ADMIN_USER = os.environ.get("KMONTAGE_ADMIN_USER", "xb_bittensor").strip().lower()
 
 app = FastAPI(title="Kurage Montage", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def protect_user_job_api(request: Request, call_next):
+    """Keep the public port from bypassing the authenticated PHP gateway."""
+    path = request.url.path
+    if path.startswith("/api/jobs") and KMONTAGE_INTERNAL_TOKEN:
+        client_host = request.client.host if request.client else ""
+        supplied = request.headers.get("X-KMontage-Token", "")
+        if client_host not in {"127.0.0.1", "::1"} and not hmac.compare_digest(
+            supplied, KMONTAGE_INTERNAL_TOKEN
+        ):
+            return JSONResponse({"ok": False, "error": "unauthorized gateway"}, status_code=401)
+    return await call_next(request)
 
 CREATE_JOB_LOCK = threading.Lock()
 JOB_FILE_LOCK = threading.RLock()
@@ -134,10 +152,11 @@ def _startup_mark_interrupted_jobs() -> None:
 
 class CreateJobRequest(BaseModel):
     url: str
-    vtuber_mode: bool = True
-    video_style: str = "ai_avatar_explainer"
+    vtuber_mode: bool = False
+    video_style: str = "faceless_documentary"
     mode: str = "summary"
-    image_provider: str = "codex_subscription"
+    image_provider: str = "ernie"
+    publish_to_kuragev: bool | None = None
     # テロップ編集者: normal=決定的ヒューリスティック / llm=claude→gemma4 fail-open
     editor_mode: str = "normal"
 
@@ -147,14 +166,34 @@ def normalize_editor_mode(value: str) -> str:
 
 
 def normalize_image_provider(value: str | None) -> str:
-    provider = str(value or "codex_subscription").strip().lower().replace("-", "_")
+    provider = str(value or "ernie").strip().lower().replace("-", "_")
     aliases = {
         "codex": "codex_subscription",
         "chatgpt": "codex_subscription",
         "chatgpt_subscription": "codex_subscription",
     }
     provider = aliases.get(provider, provider)
-    return provider if provider in {"codex_subscription", "ernie"} else "codex_subscription"
+    return provider if provider in {"codex_subscription", "ernie"} else "ernie"
+
+
+def normalize_actor_user(value: Any) -> str:
+    """Normalize an X username received from the authenticated PHP gateway."""
+    if not isinstance(value, str):
+        return KMONTAGE_ADMIN_USER
+    user = value.strip().lstrip("@").lower()
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", user):
+        return KMONTAGE_ADMIN_USER
+    return user
+
+
+def actor_is_admin(user: str) -> bool:
+    return normalize_actor_user(user) == KMONTAGE_ADMIN_USER
+
+
+def can_access_job(job: dict[str, Any], user: str) -> bool:
+    if actor_is_admin(user):
+        return True
+    return normalize_actor_user(job.get("owner")) == normalize_actor_user(user)
 
 
 def now() -> str:
@@ -220,7 +259,12 @@ def normalize_job_progress(job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
-def find_active_job_for_url(url: str, mode: str, image_provider: str = "codex_subscription") -> dict[str, Any] | None:
+def find_active_job_for_url(
+    url: str,
+    mode: str,
+    image_provider: str = "ernie",
+    owner: str | None = None,
+) -> dict[str, Any] | None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     normalized = normalize_source_url(url)
     matches: list[dict[str, Any]] = []
@@ -228,6 +272,8 @@ def find_active_job_for_url(url: str, mode: str, image_provider: str = "codex_su
         try:
             job = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        if owner is not None and normalize_actor_user(job.get("owner")) != normalize_actor_user(owner):
             continue
         if str(job.get("mode") or "summary") != mode:
             continue
@@ -250,7 +296,12 @@ def find_active_job_for_url(url: str, mode: str, image_provider: str = "codex_su
     return matches[0]
 
 
-def find_latest_job_for_url(url: str, mode: str, image_provider: str = "codex_subscription") -> dict[str, Any] | None:
+def find_latest_job_for_url(
+    url: str,
+    mode: str,
+    image_provider: str = "ernie",
+    owner: str | None = None,
+) -> dict[str, Any] | None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     normalized = normalize_source_url(url)
     matches: list[dict[str, Any]] = []
@@ -258,6 +309,8 @@ def find_latest_job_for_url(url: str, mode: str, image_provider: str = "codex_su
         try:
             job = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        if owner is not None and normalize_actor_user(job.get("owner")) != normalize_actor_user(owner):
             continue
         if str(job.get("mode") or "summary") != mode:
             continue
@@ -2242,6 +2295,8 @@ def enqueue_kurage(
     source_name: str = "Kurage Montage",
     overwrite_kurage_job_id: str = "",
     editor_mode: str = "normal",
+    owner: str = "",
+    listing_public: bool = True,
 ) -> str:
     script = analysis.get("script") or {}
     reference = analysis.get("reference_analysis") or {}
@@ -2261,6 +2316,8 @@ def enqueue_kurage(
         "image_provider": normalize_image_provider(image_provider),
         "editor_mode": editor_mode,
         "thumbnail": thumbnail,
+        "owner": normalize_actor_user(owner),
+        "listing_public": bool(listing_public),
     }
     res = requests.post(f"{KURAGE_API}/generate_from_script", json=payload, timeout=60)
     res.raise_for_status()
@@ -2449,6 +2506,8 @@ def process_job(job_id: str) -> None:
             source_name=source_name,
             overwrite_kurage_job_id=str(job.get("overwrite_kurage_job_id") or ""),
             editor_mode=normalize_editor_mode(str(job.get("editor_mode") or "normal")),
+            owner=str(job.get("owner") or KMONTAGE_ADMIN_USER),
+            listing_public=bool(job.get("listing_public", True)),
         )
         save_job(job_id, kurage_job_id=kurage_job_id, status="generating", progress=60)
 
@@ -2508,16 +2567,23 @@ def health():
         "kurage_api": KURAGE_API,
         "ollama_url": OLLAMA_URL,
         "ollama_model": OLLAMA_MODEL,
+        "ollama_via_rqdb4ai": USE_RQDB4AI_OLLAMA,
+        "ollama_queue": f"ollama-{OLLAMA_URL.split('://')[-1].split(':')[0].replace('.', '-')}-{RQDB4AI_OLLAMA_QUEUE_CLASS}",
         "modes": ["summary", "news_opinions"],
         "image_providers": ["codex_subscription", "ernie"],
-        "default_image_provider": "codex_subscription",
+        "default_image_provider": "ernie",
         "image_provider_fallback": "ernie",
         "kagentreach_news_opinion_script": str(KAGENTREACH_NEWS_OPINION_SCRIPT),
     }
 
 
 @app.post("/api/jobs")
-def create_job(req: CreateJobRequest):
+def create_job(
+    req: CreateJobRequest,
+    x_kmontage_user: str = Header(default="", alias="X-KMontage-User"),
+):
+    owner = normalize_actor_user(x_kmontage_user)
+    is_admin = actor_is_admin(owner)
     url = req.url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="url is required")
@@ -2527,9 +2593,15 @@ def create_job(req: CreateJobRequest):
     mode = req.mode.strip() or "summary"
     if mode not in {"summary", "news_opinions"}:
         raise HTTPException(status_code=400, detail="unsupported mode")
-    image_provider = normalize_image_provider(req.image_provider)
+    image_provider = normalize_image_provider(req.image_provider) if is_admin else "ernie"
+    vtuber_mode = bool(req.vtuber_mode) if is_admin else False
+    video_style = str(req.video_style or "").strip() if is_admin else "faceless_documentary"
+    if not video_style:
+        video_style = "ai_avatar_explainer" if vtuber_mode else "faceless_documentary"
+    editor_mode = normalize_editor_mode(req.editor_mode) if is_admin else "normal"
+    listing_public = is_admin if req.publish_to_kuragev is None else bool(req.publish_to_kuragev)
     with CREATE_JOB_LOCK:
-        active = find_active_job_for_url(url, mode, image_provider)
+        active = find_active_job_for_url(url, mode, image_provider, owner=owner)
         if active:
             return {
                 "ok": True,
@@ -2539,7 +2611,7 @@ def create_job(req: CreateJobRequest):
                 "progress": active.get("progress", 0),
                 "message": "同じURLの生成がすでに進行中です。既存の生成状況を表示します。",
             }
-        existing = find_latest_job_for_url(url, mode, image_provider)
+        existing = find_latest_job_for_url(url, mode, image_provider, owner=owner)
         if existing:
             return {
                 "ok": True,
@@ -2550,16 +2622,41 @@ def create_job(req: CreateJobRequest):
                 "message": "同じURLの生成済みジョブがあります。新規作成せず既存の生成状況を表示します。",
             }
         job_id = uuid.uuid4().hex[:16]
-        save_job(job_id, id=job_id, url=url, normalized_url=normalize_source_url(url), mode=mode, status="queued", progress=0, vtuber_mode=req.vtuber_mode, video_style=req.video_style, image_provider=image_provider, editor_mode=normalize_editor_mode(req.editor_mode), created_at=now())
+        save_job(
+            job_id,
+            id=job_id,
+            url=url,
+            normalized_url=normalize_source_url(url),
+            mode=mode,
+            status="queued",
+            progress=0,
+            owner=owner,
+            owner_is_admin=is_admin,
+            listing_public=listing_public,
+            vtuber_mode=vtuber_mode,
+            video_style=video_style,
+            image_provider=image_provider,
+            editor_mode=editor_mode,
+            llm_provider="ollama_rqdb4ai",
+            created_at=now(),
+        )
         thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
         thread.start()
         return {"ok": True, "job_id": job_id, "duplicate": False}
 
 
 @app.post("/api/jobs/{job_id}/regenerate")
-def regenerate_job(job_id: str, req: CreateJobRequest):
+def regenerate_job(
+    job_id: str,
+    req: CreateJobRequest,
+    x_kmontage_user: str = Header(default="", alias="X-KMontage-User"),
+):
+    owner = normalize_actor_user(x_kmontage_user)
+    is_admin = actor_is_admin(owner)
     current = load_job(job_id)
     if not current:
+        raise HTTPException(status_code=404, detail="job not found")
+    if not can_access_job(current, owner):
         raise HTTPException(status_code=404, detail="job not found")
     if is_active_job(current):
         return {
@@ -2591,10 +2688,14 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
         "mode": mode,
         "status": "queued",
         "progress": 0,
-        "vtuber_mode": req.vtuber_mode,
-        "video_style": req.video_style,
-        "image_provider": normalize_image_provider(req.image_provider),
-        "editor_mode": normalize_editor_mode(req.editor_mode),
+        "owner": owner,
+        "owner_is_admin": is_admin,
+        "listing_public": bool(current.get("listing_public", is_admin)) if req.publish_to_kuragev is None else bool(req.publish_to_kuragev),
+        "vtuber_mode": bool(req.vtuber_mode) if is_admin else False,
+        "video_style": str(req.video_style or "ai_avatar_explainer") if is_admin else "faceless_documentary",
+        "image_provider": normalize_image_provider(req.image_provider) if is_admin else "ernie",
+        "editor_mode": normalize_editor_mode(req.editor_mode) if is_admin else "normal",
+        "llm_provider": "ollama_rqdb4ai",
         "created_at": current.get("created_at") or now(),
         "regenerated_at": now(),
         "previous_kurage_job_id": old_kurage_job_id,
@@ -2606,10 +2707,16 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
 
 
 @app.post("/api/jobs/{job_id}/retry-render")
-def retry_existing_render(job_id: str):
+def retry_existing_render(
+    job_id: str,
+    x_kmontage_user: str = Header(default="", alias="X-KMontage-User"),
+):
     """Retry only Kurage rendering while preserving kmontage analysis and assets."""
+    owner = normalize_actor_user(x_kmontage_user)
     current = load_job(job_id)
     if not current:
+        raise HTTPException(status_code=404, detail="job not found")
+    if not can_access_job(current, owner):
         raise HTTPException(status_code=404, detail="job not found")
     if is_active_job(current):
         return {
@@ -2664,6 +2771,8 @@ def retry_existing_render(job_id: str):
                 source_name=source_name,
                 overwrite_kurage_job_id=kurage_job_id,
                 editor_mode=normalize_editor_mode(str(current.get("editor_mode") or "normal")),
+                owner=str(current.get("owner") or KMONTAGE_ADMIN_USER),
+                listing_public=bool(current.get("listing_public", True)),
             )
             retry_mode = "full_render"
         else:
@@ -2684,21 +2793,34 @@ def retry_existing_render(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(
+    job_id: str,
+    x_kmontage_user: str = Header(default="", alias="X-KMontage-User"),
+):
+    owner = normalize_actor_user(x_kmontage_user)
     job = load_job(job_id)
     if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if not can_access_job(job, owner):
         raise HTTPException(status_code=404, detail="job not found")
     return refresh_from_kurage(job)
 
 
 @app.get("/api/jobs")
-def list_jobs(limit: int = 20, mode: str = ""):
+def list_jobs(
+    limit: int = 20,
+    mode: str = "",
+    x_kmontage_user: str = Header(default="", alias="X-KMontage-User"),
+):
+    owner = normalize_actor_user(x_kmontage_user)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     jobs = []
     for p in JOBS_DIR.glob("*.json"):
         try:
             job = json.loads(p.read_text(encoding="utf-8"))
             if mode and str(job.get("mode") or "summary") != mode:
+                continue
+            if not can_access_job(job, owner):
                 continue
             job = normalize_job_progress(job)
             if should_reconcile_job_from_kurage(job):
@@ -2716,9 +2838,15 @@ def list_jobs(limit: int = 20, mode: str = ""):
 
 
 @app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: str):
+def delete_job(
+    job_id: str,
+    x_kmontage_user: str = Header(default="", alias="X-KMontage-User"),
+):
+    owner = normalize_actor_user(x_kmontage_user)
     job = load_job(job_id)
     if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if not can_access_job(job, owner):
         raise HTTPException(status_code=404, detail="job not found")
     kurage_job_id = job.get("kurage_job_id")
     if kurage_job_id:

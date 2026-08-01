@@ -2,6 +2,13 @@
 
 Kurage Montage (`kmontage`) turns a reference X, YouTube, blog/article, or PDF URL into a Japanese short explainer video through Kurage.
 
+The public UI is multi-user and uses Kurage's shared X login. Each non-admin
+user can see and operate only their own kmontage jobs. The first generated
+project is free; subsequent projects cost JPY 500 or 50,000 URLAI credits.
+General users use ERNIE for images and Gemma 4 12B for scripts, and cannot
+enable VTuber mode. The administrator account `xb_bittensor` bypasses billing
+and may select the additional administrator-only rendering options.
+
 ## Structure
 
 - `backend/`: FastAPI app for reference video analysis and Kurage job orchestration.
@@ -14,7 +21,9 @@ Kurage Montage (`kmontage`) turns a reference X, YouTube, blog/article, or PDF U
 2. Video URLs use `yt-dlp`, fxtwitter, and Kurage Voice Pro transcription when needed. Article/blog/PDF URLs extract source text directly.
 3. Source text, captions, or Whisper transcription are analyzed by Ollama into OpenMontage-style artifacts:
    `reference_analysis.json`, `scene_plan.json`, `script.json`, and `qa.json`.
-4. The completed script is sent to Kurage `/generate_from_script` with VTuber mode enabled.
+4. The completed script is sent to Kurage `/generate_from_script` with the
+   authenticated user's ownership and listing settings. General-user jobs use
+   the faceless documentary renderer with VTuber mode disabled.
 
 kmontage also derives a `thumbnail` specification from the same source analysis:
 the concise headline, a content-specific topic label, and a text-free 9:16 art
@@ -23,11 +32,12 @@ selected image provider, then renders exact Japanese text with Pillow in the
 White Studio layout. If that extra image call fails, rendering continues with
 scene 0 as the poster background instead of failing the video job.
 
-The job request also carries an `image_provider` choice:
+The job request also carries an `image_provider` choice. ERNIE is the default
+for administrators as well as general users:
 
-- `codex_subscription` (kmontage default): uses the official Codex CLI built-in
+- `ernie` (default): uses the ERNIE-Image-Turbo service on `192.168.0.11`.
+- `codex_subscription` (administrator option): uses the official Codex CLI built-in
   ImageGen with the local ChatGPT OAuth login, one image at a time.
-- `ernie`: uses the existing ERNIE-Image-Turbo endpoint.
 
 Codex image generation has a 10-minute per-image timeout. If authentication,
 quota, the hosted image tool, or the command fails, Kurage records the requested
@@ -55,7 +65,9 @@ Ollama generation is queued through RQDB4AI by default. kmontage submits
 `ollama-192-168-0-14-web`, then waits for the result. This prevents web/API
 requests from directly grabbing a busy local Ollama process and keeps heavy LLM
 work serialized with other Kurage jobs.
-5. The resulting video appears in `kuragev.php` because Kurage owns the final job JSON/video.
+5. The resulting video appears in `kuragev.php` only when the user selects
+   「Kurage動画一覧に掲載する」. It defaults to off for general users and on
+   for the administrator. Older jobs remain visible for compatibility.
 
 Kurage rendering can exceed one hour when ERNIE image generation is using safe
 CPU offload. kmontage waits up to four hours by default
@@ -101,6 +113,7 @@ KURAGE_API=http://127.0.0.1:18303
 OLLAMA_URL=http://192.168.0.14:11434
 OLLAMA_MODEL=gemma4:12b-it-qat
 KMONTAGE_USE_RQDB4AI_OLLAMA=1
+KMONTAGE_INTERNAL_TOKEN=<PHP gatewayと共有するランダムな内部トークン>
 KURAGEVP_BACKEND_DIR=/home/kojima/work/kuragevp/backend
 KURAGEVP_WHISPER_DEVICE=cuda
 KURAGEVP_WHISPER_COMPUTE_TYPE=float16

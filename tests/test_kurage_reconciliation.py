@@ -134,10 +134,45 @@ class KurageReconciliationTests(unittest.TestCase):
     def test_image_provider_normalization_and_request_default(self) -> None:
         request = main.CreateJobRequest(url="https://example.com/article")
 
-        self.assertEqual(request.image_provider, "codex_subscription")
+        self.assertEqual(request.image_provider, "ernie")
+        self.assertFalse(request.vtuber_mode)
+        self.assertEqual(request.video_style, "faceless_documentary")
+        self.assertIsNone(request.publish_to_kuragev)
         self.assertEqual(main.normalize_image_provider("chatgpt"), "codex_subscription")
         self.assertEqual(main.normalize_image_provider("ernie"), "ernie")
-        self.assertEqual(main.normalize_image_provider("invalid"), "codex_subscription")
+        self.assertEqual(main.normalize_image_provider("invalid"), "ernie")
+
+    @patch("backend.main.threading.Thread")
+    def test_general_user_is_forced_to_local_models_and_no_vtuber(self, thread: Mock) -> None:
+        result = main.create_job(
+            main.CreateJobRequest(
+                url="https://example.com/general-user",
+                vtuber_mode=True,
+                video_style="ai_avatar_explainer",
+                image_provider="codex_subscription",
+                editor_mode="llm",
+                publish_to_kuragev=False,
+            ),
+            x_kmontage_user="alice",
+        )
+
+        saved = main.load_job(result["job_id"]) or {}
+        self.assertEqual(saved["owner"], "alice")
+        self.assertFalse(saved["owner_is_admin"])
+        self.assertFalse(saved["vtuber_mode"])
+        self.assertEqual(saved["video_style"], "faceless_documentary")
+        self.assertEqual(saved["image_provider"], "ernie")
+        self.assertEqual(saved["llm_provider"], "ollama_rqdb4ai")
+        self.assertFalse(saved["listing_public"])
+        thread.return_value.start.assert_called_once()
+
+    def test_job_list_is_scoped_to_authenticated_owner(self) -> None:
+        self.write_job("alice-job", owner="alice", status="done")
+        self.write_job("bob-job", owner="bob", status="done")
+
+        response = main.list_jobs(limit=20, x_kmontage_user="alice")
+
+        self.assertEqual([job["id"] for job in response["jobs"]], ["alice-job"])
 
     def test_duplicate_lookup_is_scoped_to_image_provider(self) -> None:
         self.write_job(
@@ -180,6 +215,8 @@ class KurageReconciliationTests(unittest.TestCase):
         self.assertTrue(payload["thumbnail"]["enabled"])
         self.assertEqual(payload["thumbnail"]["width"], 1080)
         self.assertEqual(payload["thumbnail"]["height"], 1920)
+        self.assertEqual(payload["owner"], "xb_bittensor")
+        self.assertTrue(payload["listing_public"])
 
     def test_thumbnail_spec_uses_content_specific_x402_topic(self) -> None:
         analysis = {
