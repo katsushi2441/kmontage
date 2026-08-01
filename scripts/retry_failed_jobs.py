@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -21,8 +22,35 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--job-id", action="append", default=[])
     value.add_argument("--poll-seconds", type=int, default=15)
     value.add_argument("--job-timeout", type=int, default=21600)
+    value.add_argument("--max-load-1m", type=float, default=4.0)
+    value.add_argument("--min-available-memory-gb", type=float, default=12.0)
+    value.add_argument("--capacity-poll-seconds", type=int, default=30)
+    value.add_argument("--inter-job-cooldown", type=int, default=60)
     value.add_argument("--report", type=Path, default=ROOT / "storage" / "retry-failed-jobs-report.json")
     return value
+
+
+def available_memory_gb(meminfo: Path = Path("/proc/meminfo")) -> float:
+    for line in meminfo.read_text(encoding="ascii").splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) / 1024 / 1024
+    return 0.0
+
+
+def wait_for_capacity(max_load: float, min_memory_gb: float, poll_seconds: int) -> None:
+    """Do not begin another expensive job while the shared host is busy."""
+    while True:
+        load_1m = os.getloadavg()[0]
+        memory_gb = available_memory_gb()
+        if load_1m <= max_load and memory_gb >= min_memory_gb:
+            print(f"[capacity] ready: load1={load_1m:.2f} mem_available={memory_gb:.1f}GiB", flush=True)
+            return
+        print(
+            f"[capacity] waiting: load1={load_1m:.2f}/{max_load:.2f} "
+            f"mem_available={memory_gb:.1f}/{min_memory_gb:.1f}GiB",
+            flush=True,
+        )
+        time.sleep(max(5, poll_seconds))
 
 
 def fetch_jobs(api: str) -> list[dict]:
@@ -90,6 +118,7 @@ def main() -> int:
     args.report.parent.mkdir(parents=True, exist_ok=True)
 
     for index, job in enumerate(jobs, 1):
+        wait_for_capacity(args.max_load_1m, args.min_available_memory_gb, args.capacity_poll_seconds)
         job_id = str(job["id"])
         print(f"[{index}/{len(jobs)}] retrying {job_id}: {job.get('title') or job.get('url')}", flush=True)
         result = {"job_id": job_id, "title": job.get("title"), "started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -107,6 +136,9 @@ def main() -> int:
         result["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         report["results"].append(result)
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        if index < len(jobs) and args.inter_job_cooldown > 0:
+            print(f"[cooldown] waiting {args.inter_job_cooldown}s before the next job", flush=True)
+            time.sleep(args.inter_job_cooldown)
 
     report["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
