@@ -2262,6 +2262,17 @@ def process_job(job_id: str) -> None:
         )
 
 
+def monitor_kurage_job(job_id: str) -> None:
+    """Reconcile an already-enqueued Kurage render until it reaches a terminal state."""
+    deadline = time.time() + KURAGE_WAIT_TIMEOUT
+    while time.time() < deadline:
+        latest = refresh_from_kurage(load_job(job_id) or {"id": job_id})
+        if latest.get("status") in {"done", "error"}:
+            return
+        time.sleep(15)
+    save_job(job_id, status="generating", error=None, monitoring_deferred_at=now())
+
+
 @app.get("/")
 def index():
     return {
@@ -2372,6 +2383,68 @@ def regenerate_job(job_id: str, req: CreateJobRequest):
     thread = threading.Thread(target=process_job, args=(job_id,), daemon=True)
     thread.start()
     return {"ok": True, "job_id": job_id, "regenerated": True}
+
+
+@app.post("/api/jobs/{job_id}/retry-render")
+def retry_existing_render(job_id: str):
+    """Retry only Kurage rendering while preserving kmontage analysis and assets."""
+    current = load_job(job_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="job not found")
+    if is_active_job(current):
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "duplicate": True,
+            "regenerated": False,
+            "status": current.get("status"),
+        }
+    kurage_job_id = str(current.get("kurage_job_id") or "").strip()
+    if not kurage_job_id:
+        raise HTTPException(status_code=409, detail="existing Kurage job is required")
+    try:
+        response = requests.get(f"{KURAGE_API}/status/{kurage_job_id}", timeout=20)
+        response.raise_for_status()
+        kurage_status = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Kurage status fetch failed: {exc}") from exc
+    script = kurage_status.get("script") or current.get("script")
+    if not isinstance(script, dict) or not script.get("scenes"):
+        raise HTTPException(status_code=409, detail="existing Kurage script is unavailable")
+
+    mode = str(current.get("mode") or "summary")
+    source = "kmontage_news" if mode == "news_opinions" else "kmontage"
+    source_name = "Kurage Montage News" if mode == "news_opinions" else "Kurage Montage"
+    analysis = dict(current.get("analysis") or {})
+    analysis["script"] = script
+    save_job(
+        job_id,
+        status="generating",
+        progress=55,
+        error=None,
+        failed_at_progress=None,
+        monitoring_deferred_at=None,
+        retry_render_at=now(),
+    )
+    try:
+        resumed_id = enqueue_kurage(
+            job_id,
+            str(current.get("url") or ""),
+            str(current.get("kind") or "article"),
+            analysis,
+            bool(current.get("vtuber_mode", True)),
+            str(current.get("video_style") or "ai_avatar_explainer"),
+            source=source,
+            source_name=source_name,
+            overwrite_kurage_job_id=kurage_job_id,
+            editor_mode=normalize_editor_mode(str(current.get("editor_mode") or "normal")),
+        )
+    except Exception as exc:
+        save_job(job_id, status="error", error=str(exc), failed_at_progress=55)
+        raise HTTPException(status_code=502, detail=f"Kurage render retry failed: {exc}") from exc
+    save_job(job_id, kurage_job_id=resumed_id, status="generating", progress=60)
+    threading.Thread(target=monitor_kurage_job, args=(job_id,), daemon=True).start()
+    return {"ok": True, "job_id": job_id, "kurage_job_id": resumed_id, "regenerated": True}
 
 
 @app.get("/api/jobs/{job_id}")

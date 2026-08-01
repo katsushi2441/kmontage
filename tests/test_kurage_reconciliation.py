@@ -131,6 +131,42 @@ class KurageReconciliationTests(unittest.TestCase):
         for index in range(20):
             self.assertEqual(saved[f"field_{index}"], index)
 
+    @patch("backend.main.threading.Thread")
+    @patch("backend.main.enqueue_kurage")
+    @patch("backend.main.requests.get")
+    def test_retry_render_reuses_existing_kurage_script(
+        self, get: Mock, enqueue: Mock, thread: Mock
+    ) -> None:
+        self.write_job(
+            "retry",
+            status="error",
+            error="Voicebox TTS failed",
+            progress=80,
+            kurage_job_id="kurage-retry",
+            url="https://example.com/news",
+            mode="news_opinions",
+            kind="article",
+            vtuber_mode=True,
+            video_style="ai_avatar_news_explainer",
+        )
+        response = Mock(status_code=200)
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "status": "error",
+            "script": {"title": "Retry", "scenes": [{"index": 0, "narration": "本文"}]},
+        }
+        get.return_value = response
+        enqueue.return_value = "kurage-retry"
+
+        result = main.retry_existing_render("retry")
+
+        self.assertTrue(result["regenerated"])
+        saved = main.load_job("retry") or {}
+        self.assertEqual(saved["status"], "generating")
+        self.assertIsNone(saved["error"])
+        enqueue.assert_called_once()
+        thread.return_value.start.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
