@@ -2140,6 +2140,71 @@ def normalize_reference_analysis(analysis: dict[str, Any], meta: dict[str, Any],
     return analysis
 
 
+def build_thumbnail_spec(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Build a content-aware, text-safe poster brief for Kurage rendering."""
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    title = clean_extracted_text(str(script.get("title") or reference.get("title") or "要点解説"))
+    title = title.replace("｜", "：").replace(" | ", "：").strip("「」『』 ")
+    if len(title) > 28:
+        left, separator, right = title.partition("：")
+        if separator:
+            left = left[:18].rstrip("、，, ")
+            right = right[:12].rstrip("、，, ")
+            title = f"{left}：{right}{'…' if len(left) + len(right) + 1 < len(title) else ''}"
+        else:
+            title = title[:27].rstrip("、，, ") + "…"
+
+    tools = [str(item).strip() for item in (reference.get("tools_or_methods") or []) if str(item).strip()]
+    core_claim = clean_extracted_text(str(reference.get("core_claim") or ""))
+    searchable = " ".join([title, core_claim, *tools]).lower()
+    if "x402" in searchable:
+        topic = "OPEN SOURCE  ×  x402"
+    elif "youtube" in searchable or "ユーチューブ" in searchable:
+        topic = "YOUTUBE  ×  AI"
+    elif "oss" in searchable or "open source" in searchable or "オープンソース" in searchable:
+        topic = "OPEN SOURCE  ×  AI"
+    elif "seo" in searchable:
+        topic = "AI  ×  SEO"
+    elif any(token in searchable for token in ("投資", "株", "fx", "crypto", "暗号資産")):
+        topic = "MARKET  ×  AI"
+    else:
+        short_tool = next((tool for tool in tools if re.fullmatch(r"[A-Za-z0-9 .+/#-]{2,20}", tool)), "")
+        topic = short_tool.upper() if short_tool else "KURAGE  ×  INSIGHT"
+
+    first_visual = ""
+    if scenes and isinstance(scenes[0], dict):
+        first_visual = str(scenes[0].get("image_prompt") or "").strip()
+    subject = first_visual or "a clear visual metaphor for the source's central claim"
+    subject = re.sub(
+        r"(?:a\s+)?(?:glowing\s+)?(['\"])[^'\"]{1,40}\1\s*(?:logo|text|headline|caption|label|wording)?",
+        "an abstract geometric motif",
+        subject,
+        flags=re.I,
+    )
+    subject = re.sub(r"\b(?:logo|text|headline|caption|label|wording)\b", "abstract motif", subject, flags=re.I)
+    prompt = (
+        "Premium vertical 9:16 editorial video poster art for Kurage Montage. "
+        f"Topic: {title}. Central idea: {core_claim[:220]}. "
+        f"Visual basis: {subject[:220]}. "
+        "Show the canonical Kurage AI character as a confident technology navigator, waist-up, "
+        "mainly in the lower-right half. Preserve a large uncluttered text-safe area across the "
+        "upper-left and middle-left. Bright White Studio, off-white and pale aqua, subtle glass "
+        "panels, fine cyan technical lines, one restrained coral accent, commercial Japanese "
+        "technology magazine quality, crisp mobile-thumbnail hierarchy. No readable text, no "
+        "letters, no numbers, no logos, no watermark, no black background, no extra people."
+    )
+    return {
+        "enabled": True,
+        "headline": title or "要点解説",
+        "topic_label": topic,
+        "image_prompt": prompt,
+        "width": 1080,
+        "height": 1920,
+    }
+
+
 def write_openmontage_artifacts(job_dir: Path, analysis: dict[str, Any]) -> None:
     """Persist OpenMontage-style intermediate artifacts for auditability."""
     (job_dir / "reference_analysis.json").write_text(
@@ -2156,6 +2221,10 @@ def write_openmontage_artifacts(job_dir: Path, analysis: dict[str, Any]) -> None
     )
     (job_dir / "qa.json").write_text(
         json.dumps(analysis.get("qa") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (job_dir / "thumbnail.json").write_text(
+        json.dumps(analysis.get("thumbnail") or {}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -2177,6 +2246,7 @@ def enqueue_kurage(
     script = analysis.get("script") or {}
     reference = analysis.get("reference_analysis") or {}
     title = str(script.get("title") or reference.get("title") or "参照動画の要点解説").strip()
+    thumbnail = analysis.get("thumbnail") if isinstance(analysis.get("thumbnail"), dict) else build_thumbnail_spec(analysis)
     payload = {
         "job_id": overwrite_kurage_job_id,
         "title": title,
@@ -2190,6 +2260,7 @@ def enqueue_kurage(
         "video_style": video_style,
         "image_provider": normalize_image_provider(image_provider),
         "editor_mode": editor_mode,
+        "thumbnail": thumbnail,
     }
     res = requests.post(f"{KURAGE_API}/generate_from_script", json=payload, timeout=60)
     res.raise_for_status()
@@ -2224,6 +2295,10 @@ def refresh_from_kurage(job: dict[str, Any]) -> dict[str, Any]:
         updates["image_provider"] = status.get("image_provider") or job.get("image_provider") or "ernie"
         updates["image_provider_actual"] = status.get("image_provider_actual")
         updates["image_provider_fallbacks"] = status.get("image_provider_fallbacks") or 0
+    if status.get("thumbnail_generation") is not None:
+        updates["thumbnail_generation"] = status.get("thumbnail_generation")
+    if status.get("thumbnail_spec") is not None:
+        updates["thumbnail_spec"] = status.get("thumbnail_spec")
     if status.get("status") == "done":
         updates.update({
             "status": "done",
@@ -2337,6 +2412,9 @@ def process_job(job_id: str) -> None:
         reference = analysis.get("reference_analysis") or {}
         scene_plan = analysis.get("scene_plan") or {}
         script = analysis.get("script") or {}
+        thumbnail = build_thumbnail_spec(analysis)
+        analysis["thumbnail"] = thumbnail
+        write_openmontage_artifacts(job_dir, analysis)
         summary = reference.get("core_claim") or "参照動画の要点を忠実に整理しています。"
         save_job(
             job_id,
@@ -2347,6 +2425,7 @@ def process_job(job_id: str) -> None:
             title=script.get("title") or scene_plan.get("title") or reference.get("title"),
             summary=summary,
             script_outline=[s.get("message") or s.get("role") for s in (scene_plan.get("scenes") or []) if isinstance(s, dict)],
+            thumbnail=thumbnail,
         )
 
         save_job(job_id, status="generating", progress=55)

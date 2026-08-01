@@ -177,6 +177,30 @@ class KurageReconciliationTests(unittest.TestCase):
 
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["image_provider"], "codex_subscription")
+        self.assertTrue(payload["thumbnail"]["enabled"])
+        self.assertEqual(payload["thumbnail"]["width"], 1080)
+        self.assertEqual(payload["thumbnail"]["height"], 1920)
+
+    def test_thumbnail_spec_uses_content_specific_x402_topic(self) -> None:
+        analysis = {
+            "reference_analysis": {
+                "title": "OSS収益化の答え",
+                "core_claim": "オープンソースの実行部分をx402で従量課金する",
+                "tools_or_methods": ["x402", "PayAPI Market"],
+            },
+            "script": {
+                "title": "OSSで食べていく方法：30年越しの正解",
+                "scenes": [{"image_prompt": "Kurage AI with a glowing 'OSS' logo and API payment nodes"}],
+            },
+        }
+
+        spec = main.build_thumbnail_spec(analysis)
+
+        self.assertEqual(spec["headline"], "OSSで食べていく方法：30年越しの正解")
+        self.assertEqual(spec["topic_label"], "OPEN SOURCE  ×  x402")
+        self.assertIn("Kurage AI", spec["image_prompt"])
+        self.assertIn("No readable text", spec["image_prompt"])
+        self.assertNotIn("'OSS' logo", spec["image_prompt"])
 
     @patch("backend.main.requests.post")
     @patch("backend.main.threading.Thread")

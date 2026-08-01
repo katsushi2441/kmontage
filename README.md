@@ -16,6 +16,13 @@ Kurage Montage (`kmontage`) turns a reference X, YouTube, blog/article, or PDF U
    `reference_analysis.json`, `scene_plan.json`, `script.json`, and `qa.json`.
 4. The completed script is sent to Kurage `/generate_from_script` with VTuber mode enabled.
 
+kmontage also derives a `thumbnail` specification from the same source analysis:
+the concise headline, a content-specific topic label, and a text-free 9:16 art
+prompt. Kurage generates one dedicated 1080×1920 poster background with the
+selected image provider, then renders exact Japanese text with Pillow in the
+White Studio layout. If that extra image call fails, rendering continues with
+scene 0 as the poster background instead of failing the video job.
+
 The job request also carries an `image_provider` choice:
 
 - `codex_subscription` (kmontage default): uses the official Codex CLI built-in
