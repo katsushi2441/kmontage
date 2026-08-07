@@ -648,6 +648,48 @@ def parse_html_document(
     return meta, text
 
 
+def decode_html_response(res) -> str:
+    """HTTPレスポンスをHTMLとして正しい文字コードで読む。
+
+    requests は Content-Type に charset が無いと ISO-8859-1 とみなす（RFC 2616）。
+    共有サーバーは charset を付けずに返すことが多く、そのまま res.text を使うと
+    UTF-8 の日本語が全部化ける（heteml が該当。実測で確認）。
+
+    apparent_encoding（charset_normalizer の推定）も当てにならない。
+    日本語のUTF-8ページを Windows-1254 と誤推定した実例がある。
+
+    HTMLは自分の文字コードを <meta> で宣言しているので、そこを見るのが確実。
+      1. Content-Type ヘッダに charset があればそれ
+      2. HTMLの <meta charset> / <meta http-equiv>
+      3. UTF-8（現代のWebの既定）
+      4. それでも壊れるなら推定に頼る
+    """
+    return decode_html_bytes(res.content, res.headers.get("content-type", ""))
+
+
+def decode_html_bytes(body: bytes, ctype: str = "") -> str:
+    """HTMLのバイト列を、宣言された文字コードで読む。decode_html_response の実体。"""
+    m = re.search(r"charset=([\w\-]+)", ctype, re.I)
+    if m:
+        try:
+            return body.decode(m.group(1), errors="replace")
+        except LookupError:
+            pass
+
+    head = body[:4096]
+    m = re.search(rb"<meta[^>]+charset=[\"\']?([\w\-]+)", head, re.I)
+    if m:
+        try:
+            return body.decode(m.group(1).decode("ascii", "ignore"), errors="replace")
+        except LookupError:
+            pass
+
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body.decode("cp932", errors="replace")
+
+
 def html_metadata_and_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
     headers = {"User-Agent": "Mozilla/5.0 KurageMontage/1.0"}
     res = requests.get(url, headers=headers, timeout=40)
@@ -668,7 +710,7 @@ def html_metadata_and_text(url: str, job_dir: Path) -> tuple[dict[str, Any], str
             "duration": 0,
         }
         return meta, extract_pdf_text(pdf_path, job_dir)
-    return parse_html_document(res.text, url)
+    return parse_html_document(decode_html_response(res), url)
 
 
 def fetch_yahoo_news_document(url: str, job_dir: Path) -> tuple[dict[str, Any], str]:
@@ -713,7 +755,8 @@ def fetch_yahoo_news_document(url: str, job_dir: Path) -> tuple[dict[str, Any], 
     body = snapshot.content
     if body.startswith(b"\x1f\x8b"):
         body = gzip.decompress(body)
-    html = body.decode(snapshot.encoding or "utf-8", errors="replace")
+    # snapshot.encoding は charset 未指定だと ISO-8859-1 になり日本語が化ける
+    html = decode_html_bytes(body, snapshot.headers.get("content-type", ""))
     (job_dir / "wayback_snapshot.html").write_text(html, encoding="utf-8")
     (job_dir / "wayback_source.json").write_text(json.dumps({
         "original_url": url,
