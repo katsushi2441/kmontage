@@ -1982,7 +1982,7 @@ def expand_short_but_specific_script(analysis: dict[str, Any], meta: dict[str, A
     """
     script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
     scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
-    if not (5 <= len(scenes) < 16):
+    if not (5 <= len(scenes) < 12):   # 12シーン以上は既に十分。分割すると上限で末尾が捨てられる
         return analysis
 
     title = str(script.get("title") or meta.get("title") or "参照動画の要点解説")
@@ -2262,14 +2262,14 @@ def normalize_reference_analysis(analysis: dict[str, Any], meta: dict[str, Any],
             "duration": 10,
         } for i, point in enumerate(points)]
     analysis["reference_analysis"] = reference
-    analysis["script"] = {"title": title[:70], "scenes": cleaned[:12]}
+    analysis["script"] = {"title": title[:70], "scenes": cleaned[:18]}
     plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
     plan["title"] = plan.get("title") or title
-    plan["target_duration"] = sum(int(s.get("duration") or 10) for s in cleaned[:12])
+    plan["target_duration"] = sum(int(s.get("duration") or 10) for s in cleaned[:18])
     if not isinstance(plan.get("scenes"), list) or not plan.get("scenes"):
         plan["scenes"] = [
             {"index": s["index"], "role": "faithful_summary", "message": s["narration"], "source_basis": "transcript"}
-            for s in cleaned[:12]
+            for s in cleaned[:18]
         ]
     analysis["scene_plan"] = plan
     analysis.setdefault("qa", {})
