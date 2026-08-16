@@ -318,6 +318,10 @@ def find_latest_job_for_url(
             continue
         if normalize_source_url(str(job.get("url") or "")) != normalized:
             continue
+        # 失敗したジョブは「生成済み」とみなさない。エラーで止まったURLを
+        # 再投入したとき、過去の失敗が新しい試行をブロックしてしまうため。
+        if str(job.get("status") or "") == "error":
+            continue
         if should_reconcile_job_from_kurage(job):
             try:
                 job = refresh_from_kurage(job)
@@ -1012,7 +1016,7 @@ URL: {url}
 - 日本語で出力
 - 元資料を丸ごと転載するのではなく、要点解説・考察にする
 - 視聴者が最初の3秒で何の話かわかるフックを作る
-- 60〜120秒の縦型ショート向け、12シーン、各10秒程度
+- 120〜180秒(2〜3分)の縦型動画向け、16〜18シーン、各10秒程度。合計ナレーションは700〜900字を目安にする
 - Kurage VTuberが話す想定
 - 抽象論で終わらせない。「何を、どの順番で、なぜやるのか」を入れる
 - 金額、再生数、RPM、制作費、期間、投稿頻度などの数字を優先して残す
@@ -1243,6 +1247,7 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
             "scene_count": len(((analysis.get("script") or {}).get("scenes") or [])),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         raise RuntimeError("日本語ショート台本の生成に失敗しました。英語台本のままKurageへ送信しないため停止しました。")
+    analysis = backfill_evidence_numbers(analysis, meta, transcript)
     issues = script_quality_issues(analysis, meta, transcript)
     if issues:
         (job_dir / "script_quality_repair_reason.json").write_text(json.dumps({
@@ -1260,6 +1265,7 @@ def analyze_reference(url: str, kind: str, meta: dict[str, Any], transcript: str
         repaired = repair_analysis_to_japanese(url, kind, meta, transcript, analysis, job_dir, must_include=focus_facts)
         analysis = normalize_reference_analysis(repaired, meta, transcript)
         analysis = expand_short_but_specific_script(analysis, meta, transcript)
+        analysis = backfill_evidence_numbers(analysis, meta, transcript)
         issues = script_quality_issues(analysis, meta, transcript)
     if issues:
         (job_dir / "script_quality_error.json").write_text(json.dumps({
@@ -1382,7 +1388,7 @@ X投稿URLの場合の最重要ルール:
 - image_prompt には no text, no letters, no numbers を入れる。読ませたい文字はHyperFramesテロップで重ねる前提にする。
 - ニュース紹介だけで終わらず、賛成・懸念・実務目線・今後の見方など、複数の意見を整理する。
 - 台本は自然な日本語。英語原文をそのまま貼らない。
-- 60〜120秒、12シーン、各8〜10秒程度。
+- 120〜180秒(2〜3分)、16〜18シーン、各8〜10秒程度。合計ナレーションは700〜900字を目安にする。
 - image_promptだけ英語でよい。明るいWhite Studio、Kurage avatar explainerの映像指示にする。
 - 十分な根拠がない場合は {{"error":"insufficient_reaction_detail","reason":"理由"}} を返す。汎用台本で埋めない。
 - JSONのみで返す。
@@ -1835,6 +1841,40 @@ def extract_source_terms(text: str) -> list[str]:
     return terms[:24]
 
 
+def backfill_evidence_numbers(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> dict[str, Any]:
+    """台本に実際に出てくる元資料の数字を evidence_numbers へ補完する。
+
+    ローカルLLMは台本自体は元資料に忠実に作れても、reference_analysis の
+    evidence_numbers を1〜2件しか埋めないことがある。台本側の根拠チェック
+    (missing_source_numbers)は別途走っているので、ここで「実際にナレーション
+    に現れた元資料の数字」だけを補完しても、忠実性の担保は落ちない。
+    捏造を防ぐため、元資料に存在しナレーションにも現れた数字だけを足す。
+    """
+    reference = analysis.get("reference_analysis") if isinstance(analysis.get("reference_analysis"), dict) else {}
+    script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
+    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
+    narrations = "\n".join(str(s.get("narration") or "") for s in scenes if isinstance(s, dict))
+    if not narrations:
+        return analysis
+    evidence = [str(x) for x in (reference.get("evidence_numbers") or []) if str(x).strip()]
+    if len(evidence) >= 3:
+        return analysis
+    have = normalize_number_token("\n".join(evidence))
+    for num in quality_source_numbers(analysis, meta, transcript):
+        token = normalize_number_token(num)
+        if not token or token in have:
+            continue
+        if token in normalize_number_token(narrations):   # 台本に実在する数字だけ採用
+            evidence.append(str(num))
+            have += "\n" + token
+        if len(evidence) >= 4:
+            break
+    if evidence:
+        reference["evidence_numbers"] = evidence
+        analysis["reference_analysis"] = reference
+    return analysis
+
+
 def script_quality_issues(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> list[str]:
     script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
     scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
@@ -1933,7 +1973,7 @@ def split_narration_for_short_scene(text: str) -> list[str]:
 
 
 def expand_short_but_specific_script(analysis: dict[str, Any], meta: dict[str, Any], transcript: str) -> dict[str, Any]:
-    """Turn a good but too-short script into 10-12 faithful scenes.
+    """Turn a good but too-short script into 16-18 faithful scenes.
 
     Local LLMs often understand the source correctly but return six scenes for
     five-step videos. That should not be treated as an unfaithful script. Split
@@ -1942,7 +1982,7 @@ def expand_short_but_specific_script(analysis: dict[str, Any], meta: dict[str, A
     """
     script = analysis.get("script") if isinstance(analysis.get("script"), dict) else {}
     scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
-    if not (5 <= len(scenes) < 10):
+    if not (5 <= len(scenes) < 16):
         return analysis
 
     title = str(script.get("title") or meta.get("title") or "参照動画の要点解説")
@@ -1982,12 +2022,12 @@ def expand_short_but_specific_script(analysis: dict[str, Any], meta: dict[str, A
                 "image_prompt": str(scene.get("image_prompt") or "clean Japanese vertical explainer, data cards, 9:16").strip()[:180],
                 "duration": max(6, min(9, int(scene.get("duration") or 8))),
             })
-            if len(expanded) >= 12:
+            if len(expanded) >= 18:
                 break
-        if len(expanded) >= 12:
+        if len(expanded) >= 18:
             break
 
-    if len(expanded) < 10:
+    if len(expanded) < 16:
         plan = analysis.get("scene_plan") if isinstance(analysis.get("scene_plan"), dict) else {}
         plan_scenes = plan.get("scenes") if isinstance(plan.get("scenes"), list) else []
         for plan_scene in plan_scenes:
@@ -2064,7 +2104,7 @@ URL: {url}
 - title、reference_analysis、scene_plan.message、script.scenes[].narration はすべて自然な日本語
 - 英語字幕をそのまま貼り付けない。固有名詞とツール名以外は日本語にする
 - 元資料の数字、手順、収益、ツール、注意点は忠実に残す
-- 60〜120秒の縦型ショート向け、12シーン、各8〜10秒程度
+- 120〜180秒(2〜3分)の縦型動画向け、16〜18シーン、各8〜10秒程度。合計ナレーションは700〜900字を目安にする
 - image_prompt だけは英語でよい
 - JSONのみで返す
 
@@ -2201,7 +2241,7 @@ def normalize_reference_analysis(analysis: dict[str, Any], meta: dict[str, Any],
     if not isinstance(scenes, list):
         scenes = []
     cleaned = []
-    for i, scene in enumerate(scenes[:12]):
+    for i, scene in enumerate(scenes[:18]):
         if not isinstance(scene, dict):
             continue
         narration = str(scene.get("narration") or "").strip()
